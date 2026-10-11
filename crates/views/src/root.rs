@@ -1,5 +1,5 @@
 use gpui::{AnyView, Context, Entity, MouseButton, NavigationDirection, Render, Task};
-use gpui::{App, Font, FontFallbacks, SharedString, font, prelude::*};
+use gpui::{App, Font, FontFallbacks, SharedString, StyleRefinement, font, prelude::*};
 use gpui::{Window, div};
 use input::{
     CloseWindow, MinimizeWindow, NavigateBack, NavigateForward, OpenFilter, OpenSearch,
@@ -920,7 +920,16 @@ impl Render for Root {
             )
             // The ambient background sits behind everything, title bar included.
             .when(ambient, |this| this.child(self.ambient.clone()))
-            .child(self.title_bar.clone())
+            // The bar only changes when it is told to, so a frame drawn for the lyrics or the
+            // progress bar replays it rather than building it again.
+            .child(
+                self.title_bar.clone().cached(
+                    StyleRefinement::default()
+                        .w_full()
+                        .h(ui::snapped(theme.metrics.title_bar, window))
+                        .flex_none(),
+                ),
+            )
             .when_else(
                 show_sign_in,
                 |this| this.child(div().flex().flex_1().min_h_0().child(self.login.clone())),
