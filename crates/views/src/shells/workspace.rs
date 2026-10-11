@@ -221,7 +221,7 @@ impl Render for Workspace {
             .w_full()
             .flex_1()
             .min_h_0()
-            .key_context(WORKSPACE_CONTEXT)
+            .key_context(super::shell_context(WORKSPACE_CONTEXT))
             .track_focus(&self.focus)
             .on_action(|_: &SelectNext, window, cx| {
                 if let Some(table) = shown_listing(cx) {

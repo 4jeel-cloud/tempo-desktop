@@ -5,6 +5,7 @@
 //! `state.sqlite` as [`StateValues`]. [`AppSettings`] holds both and saves each on its own
 //! debounce, so a sidebar drag never rewrites the preferences file.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -538,30 +539,47 @@ impl Default for StateValues {
 }
 
 /// The `runtime` row of the `app_state` table: one JSON blob, replaced whole on every save.
-#[derive(Clone)]
+/// Every call goes through one kept connection, because playback saves every few seconds and
+/// opening the database again parses its whole schema each time.
 struct StateStore {
     database: Database,
+    connection: RefCell<Option<rusqlite::Connection>>,
 }
 
 impl StateStore {
     fn new(database: Database) -> Self {
-        Self { database }
+        Self {
+            database,
+            connection: RefCell::new(None),
+        }
     }
 
-    fn open(&self) -> Result<rusqlite::Connection> {
-        self.database.open()
+    /// Runs `work` on the kept connection, opening one when there is none. A failure drops the
+    /// connection, so the next call starts from a fresh one.
+    fn with<T>(&self, work: impl FnOnce(&rusqlite::Connection) -> Result<T>) -> Result<T> {
+        let mut kept = self.connection.borrow_mut();
+        let connection = match kept.take() {
+            Some(connection) => connection,
+            None => self.database.open()?,
+        };
+        let done = work(&connection);
+        if done.is_ok() {
+            *kept = Some(connection);
+        }
+        done
     }
 
     fn load(&self) -> Result<Option<StateValues>> {
-        let encoded: Option<String> = self
-            .open()?
-            .query_row(
-                "SELECT value FROM app_state WHERE key = 'runtime'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .context("cannot read app state")?;
+        let encoded: Option<String> = self.with(|connection| {
+            connection
+                .query_row(
+                    "SELECT value FROM app_state WHERE key = 'runtime'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("cannot read app state")
+        })?;
         encoded
             .map(|encoded| serde_json::from_str(&encoded).context("cannot decode app state"))
             .transpose()
@@ -569,13 +587,15 @@ impl StateStore {
 
     fn save(&self, state: &StateValues) -> Result<()> {
         let encoded = serde_json::to_string(state).context("cannot encode app state")?;
-        self.open()?
-            .execute(
-                "INSERT INTO app_state (key, value) VALUES ('runtime', ?)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![encoded],
-            )
-            .context("cannot save app state")?;
+        self.with(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO app_state (key, value) VALUES ('runtime', ?)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![encoded],
+                )
+                .context("cannot save app state")
+        })?;
         Ok(())
     }
 }

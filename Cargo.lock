@@ -9567,6 +9567,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde_json",
  "sha2",
+ "smallvec",
  "tokio",
  "windows-sys 0.61.2",
 ]

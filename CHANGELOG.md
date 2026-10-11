@@ -13,6 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   small on a big screen. Small windows keep the size they had.
 - On Windows, the minimize, maximize, restore and close buttons now use Windows' own icons, so
   they match other Windows apps.
+- Sonora uses less memory while your Apple Music library loads at startup, and it no longer
+  frees memory in the background every few seconds to stay small.
 
 ### Fixed
 
