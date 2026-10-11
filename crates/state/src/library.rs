@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, Context, Entity, SharedString, Task};
 use music::{Album, MediaKind, MusicApi, Page, Pages, Playlist, SavedArtist, Shape, Track};
+use tokio::sync::Semaphore;
 
 use crate::snapshot::{Kind, Remembered, Snapshots};
 use crate::{Io, Network, Outcome, Session, SessionEvent, Target, Toasts, join, mosaic};
@@ -17,6 +18,10 @@ const FATAL: [LibraryPart; 3] = [
     LibraryPart::Albums,
 ];
 const FATAL_LOCAL: [LibraryPart; 2] = [LibraryPart::Tracks, LibraryPart::Albums];
+
+/// Lets a few playlists have their contents read at a time. Each read holds every track of its
+/// playlist until it is cut down to ids, and a library asks for all of its playlists at once.
+static READS: Semaphore = Semaphore::const_new(4);
 
 /// Which provider a library page, an id or a playlist belongs to. The streaming shelf follows
 /// the signed-in provider; the local shelf follows the imported folder.
@@ -1839,18 +1844,23 @@ impl Library {
             let key = id.clone();
             let asked = id.clone();
             let task = cx.spawn(async move |this, cx| {
-                let listed =
-                    join(io.spawn(async move { client.playlist_tracks(&asked).await })).await;
+                let listed = join(io.spawn(async move {
+                    let _turn = READS.acquire().await;
+                    let tracks = client.playlist_tracks(&asked).await?;
+                    let covers = music::distinct_covers(&tracks, mosaic::TILES);
+                    let ids: HashSet<String> =
+                        tracks.into_iter().filter_map(|track| track.id).collect();
+                    anyhow::Ok((ids, covers))
+                }))
+                .await;
 
                 this.update(cx, |this, cx| {
                     this.reading.remove(&key);
                     match listed {
-                        Ok(tracks) => {
+                        Ok((ids, covers)) => {
                             if let Some(stamp) = this.mosaic_stamp(&key) {
-                                let covers = music::distinct_covers(&tracks, mosaic::TILES);
                                 this.paint_mosaic(key.clone(), stamp, covers, cx);
                             }
-                            let ids = tracks.into_iter().filter_map(|track| track.id).collect();
                             this.contents.insert(key, ids);
                             cx.notify();
                         }
