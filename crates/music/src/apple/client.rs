@@ -376,7 +376,7 @@ impl AppleClient {
         );
         // A body cut short of the length it announced is the gateway giving up mid answer, not
         // an answer with anything wrong in it.
-        let text = response.text().await.map_err(|error| {
+        let text = response.bytes().await.map(utf8).map_err(|error| {
             anyhow::Error::new(error)
                 .context(format!("cannot read the apple music answer for {path}"))
                 .context(Busy(after))
@@ -1961,6 +1961,15 @@ fn backoff(tried: u32) -> Duration {
 /// The id of a library row, which is the library's own rather than the catalog's.
 fn library_id(row: &Resource) -> Option<String> {
     row.id.as_str().map(str::to_owned)
+}
+
+/// A body as text, decoded the way reqwest's own `text` decodes one. Valid UTF-8 takes over the
+/// buffer the body was collected into rather than being copied out of it.
+fn utf8(body: bytes::Bytes) -> String {
+    match String::from_utf8(Vec::from(body)) {
+        Ok(text) => text,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    }
 }
 
 /// An answer body as a tree, or null when it is empty or not JSON.
