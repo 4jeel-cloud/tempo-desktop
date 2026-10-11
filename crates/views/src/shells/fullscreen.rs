@@ -1152,7 +1152,7 @@ impl Render for FullscreenView {
 
         div()
             .id("fullscreen")
-            .key_context(WORKSPACE_CONTEXT)
+            .key_context(super::shell_context(WORKSPACE_CONTEXT))
             .track_focus(&self.focus)
             .relative()
             .flex()
