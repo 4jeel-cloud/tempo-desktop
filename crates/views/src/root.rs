@@ -89,6 +89,9 @@ pub struct Root {
     screens: Screens,
     adaptive: Entity<Adaptive>,
     background: Option<gpui::WindowBackgroundAppearance>,
+    /// The font the window is set in and the name it was built from, rebuilt only when the
+    /// chosen font changes since the root renders every frame anything below it animates.
+    font: Option<(String, Font)>,
     #[cfg(target_os = "windows")]
     rounded: Option<ui::Rounding>,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -311,6 +314,7 @@ impl Root {
             adaptive,
             ambient,
             background: None,
+            font: None,
             #[cfg(target_os = "windows")]
             rounded: None,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -537,6 +541,19 @@ impl Root {
         }));
     }
 
+    /// The font the window is set in, built again only once a different font is chosen.
+    fn font(&mut self, cx: &App) -> Font {
+        let chosen = Sonora::global(cx).settings.read(cx).font();
+        match &self.font {
+            Some((name, font)) if name == chosen => font.clone(),
+            _ => {
+                let font = ui_font(chosen);
+                self.font = Some((chosen.to_owned(), font.clone()));
+                font
+            }
+        }
+    }
+
     /// How much of the shell its entrance still hides, asking for the next frame while it runs.
     /// A see-through window fades the shell itself, so every frame of that fade is a full
     /// refresh, or the workspace's cached views would replay the opacity they were first
@@ -698,8 +715,7 @@ const SCRIPTS: [&str; 18] = [
     "Segoe UI Emoji",
 ];
 
-fn ui_font(cx: &App) -> Font {
-    let chosen = Sonora::global(cx).settings.read(cx).font();
+fn ui_font(chosen: &str) -> Font {
     match chosen == SYSTEM_FONT {
         true => Font {
             fallbacks: Some(scripts(false).clone()),
@@ -858,7 +874,7 @@ impl Render for Root {
         let root = div()
             .relative()
             .flex()
-            .font(ui_font(cx))
+            .font(self.font(cx))
             .flex_col()
             .size_full()
             .when_some(radius, |this, radius| {
