@@ -19,11 +19,12 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
 use futures::future::try_join_all;
 use futures::stream::{self, StreamExt as _, TryStreamExt as _};
+use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use crate::apple::auth::{self, AGENT};
 use crate::apple::recommend;
-use crate::apple::wire;
+use crate::apple::wire::{self, Resource};
 use crate::engine::Loudness;
 use crate::{
     Album, AlbumCatalogue, AlbumDetail, Artist, ArtistCatalogue, ArtistProfile, Genre, GenreDetail,
@@ -174,7 +175,7 @@ pub struct Details {
 /// a paged caller listens on and the reader its rows are turned into items with.
 type Sink<'a, T> = (
     &'a tokio::sync::mpsc::Sender<Result<Page<T>>>,
-    &'a (dyn Fn(&Value) -> Option<T> + Sync),
+    &'a (dyn Fn(&Resource<'_>) -> Option<T> + Sync),
 );
 
 /// The last pin list as the client remembers it: the library id behind each pin Sonora shows,
@@ -207,29 +208,13 @@ impl Bodies {
     /// Every row of every page read through `read`, in order.
     fn read<T, F>(&self, read: &F) -> Vec<T>
     where
-        F: Fn(&Value) -> Option<T> + ?Sized,
+        F: Fn(&Resource<'_>) -> Option<T> + ?Sized,
     {
         self.pages
             .iter()
-            .flat_map(|body| read_page(body, read))
+            .flat_map(|body| wire::outline(body).read(read))
             .collect()
     }
-}
-
-/// The parts of a page body a listing reads, with every row left as the text it arrived as.
-#[derive(Default, serde::Deserialize)]
-struct Shape<'a> {
-    #[serde(borrow, default)]
-    data: Vec<&'a serde_json::value::RawValue>,
-    #[serde(borrow, default)]
-    next: Option<&'a serde_json::value::RawValue>,
-    #[serde(default)]
-    meta: Option<Meta>,
-}
-
-#[derive(serde::Deserialize)]
-struct Meta {
-    total: Option<u64>,
 }
 
 /// A failure the gateway is answering for rather than the request: a connection that broke
@@ -278,10 +263,12 @@ impl AppleClient {
             listings: Arc::default(),
             pinned: Arc::default(),
         };
-        let answered = client.get("/me/storefront", &[]).await?;
+        let body = client.get("/me/storefront", &[]).await?;
+        let answered: wire::Answer = wire::answer(&body);
         let storefront = answered
-            .pointer("/data/0/id")
-            .and_then(Value::as_str)
+            .data
+            .first()
+            .and_then(|row| row.id.as_str())
             .context("apple named no storefront for this account")?;
         log::info!("apple: signed in, storefront {storefront}");
         Ok(Self {
@@ -416,16 +403,19 @@ impl AppleClient {
         Ok(text)
     }
 
-    pub(crate) async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-        self.send(reqwest::Method::GET, path, query, None)
-            .await
-            .map(|text| parse(&text))
+    /// A read, answered with the body as Apple sent it, for the caller to read with
+    /// [`wire::answer`].
+    pub(crate) async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<String> {
+        self.send(reqwest::Method::GET, path, query, None).await
     }
 
-    async fn post(&self, path: &str, query: &[(&str, &str)], body: Option<Value>) -> Result<Value> {
-        self.send(reqwest::Method::POST, path, query, body)
-            .await
-            .map(|text| parse(&text))
+    async fn post(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> Result<String> {
+        self.send(reqwest::Method::POST, path, query, body).await
     }
 
     async fn patch(&self, path: &str, body: Value) -> Result<()> {
@@ -469,25 +459,22 @@ impl AppleClient {
     /// The account's live recently played shelf, newest first: the albums and playlists the
     /// recent plays came from, read the way the web player's own shelf reads them.
     async fn recent_items(&self) -> Result<Vec<GenreItem>> {
-        let answered = self
+        let body = self
             .get("/me/recent/played", &[("limit", "10"), ALBUM_ARTISTS])
             .await?;
+        let answered: wire::Answer = wire::answer(&body);
         Ok(answered
-            .get("data")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| match row.get("type").and_then(Value::as_str) {
-                        Some("albums") => wire::album(row).map(GenreItem::Album),
-                        Some("library-albums") => wire::library_album(row).map(GenreItem::Album),
-                        Some("playlists") | Some("library-playlists") => {
-                            wire::playlist(row).map(GenreItem::Playlist)
-                        }
-                        _ => None,
-                    })
-                    .collect()
+            .data
+            .iter()
+            .filter_map(|row| match row.kind.as_str() {
+                Some("albums") => wire::album(row).map(GenreItem::Album),
+                Some("library-albums") => wire::library_album(row).map(GenreItem::Album),
+                Some("playlists") | Some("library-playlists") => {
+                    wire::playlist(row).map(GenreItem::Playlist)
+                }
+                _ => None,
             })
-            .unwrap_or_default())
+            .collect())
     }
 
     /// Walks a paged listing and reads every row with `read`. The rows come from
@@ -500,7 +487,7 @@ impl AppleClient {
         read: F,
     ) -> Result<Vec<T>>
     where
-        F: Fn(&Value) -> Option<T>,
+        F: Fn(&Resource<'_>) -> Option<T>,
     {
         let bodies = self.listing(path, page, query).await?;
         Ok(bodies.read(&read))
@@ -580,7 +567,7 @@ impl AppleClient {
         path: &'static str,
         page: usize,
         query: &'static [(&'static str, &'static str)],
-        read: fn(&Value) -> Option<T>,
+        read: fn(&Resource<'_>) -> Option<T>,
     ) -> Pages<T> {
         let (sink, pages) = tokio::sync::mpsc::channel(FAN);
         let client = self.clone();
@@ -647,16 +634,17 @@ impl AppleClient {
         let started = Instant::now();
 
         let first = self.body(path, &asked).await?;
-        let (total, more, got) = {
-            let shape = shape(&first);
-            let total = shape
+        let (total, more, got, items) = {
+            let outline = wire::outline(&first);
+            let total = outline
                 .meta
-                .and_then(|meta| meta.total)
+                .total
+                .as_u64()
                 .and_then(|total| usize::try_from(total).ok());
-            (total, shape.next.is_some(), shape.data.len())
+            let items = sink.map(|(_, read)| outline.read(read));
+            (total, outline.next.is_present(), outline.data.len(), items)
         };
-        if let Some((sink, read)) = sink {
-            let items = read_page(&first, read);
+        if let (Some((sink, _)), Some(items)) = (sink, items) {
             sink.send(Ok(Page { total, items })).await.ok();
         }
         let mut bodies = Bodies {
@@ -679,13 +667,13 @@ impl AppleClient {
                 })
                 .buffered(FAN);
             while let Some(body) = answers.try_next().await? {
-                let (rows, more) = {
-                    let shape = shape(&body);
-                    (shape.data.len(), shape.next.is_some())
+                let (rows, more, items) = {
+                    let outline = wire::outline(&body);
+                    let items = sink.map(|(_, read)| outline.read(read));
+                    (outline.data.len(), outline.next.is_present(), items)
                 };
                 let last = rows < page || !more;
-                if let Some((sink, read)) = sink {
-                    let items = read_page(&body, read);
+                if let (Some((sink, _)), Some(items)) = (sink, items) {
                     sink.send(Ok(Page { total, items })).await.ok();
                 }
                 bodies.rows += rows;
@@ -739,16 +727,22 @@ impl AppleClient {
             async move { self.get("/me/library", &query).await }
         }))
         .await?;
-        let loved: HashSet<String> = answers
-            .iter()
-            .flat_map(|answered| rows(answered).iter())
-            .filter(|row| {
-                row.pointer("/attributes/personalRating")
-                    .and_then(Value::as_i64)
-                    == Some(1)
-            })
-            .filter_map(library_id)
-            .collect();
+        let mut loved = HashSet::new();
+        for body in &answers {
+            let answered: wire::Answer = wire::answer(body);
+            loved.extend(
+                answered
+                    .data
+                    .iter()
+                    .filter(|row| {
+                        row.attributes
+                            .as_ref()
+                            .and_then(|attributes| attributes.personal_rating.as_i64())
+                            == Some(1)
+                    })
+                    .filter_map(library_id),
+            );
+        }
         Ok(items
             .into_iter()
             .filter(|(id, _)| loved.contains(id))
@@ -774,9 +768,10 @@ impl AppleClient {
     async fn mine(&self, kind: &str, id: &str) -> Result<Option<String>> {
         let path = self.catalog(&format!("/{kind}/{}/library", escape::component(id)));
         match self.get(&path, &[]).await {
-            Ok(answered) => Ok(answered
-                .pointer("/data/0/id")
-                .and_then(Value::as_str)
+            Ok(body) => Ok(wire::answer::<IgnoredAny>(&body)
+                .data
+                .first()
+                .and_then(|row| row.id.as_str())
                 .map(str::to_owned)),
             // Not in the library at all, which Apple reports as a missing relationship.
             Err(error) if error.is::<Missing>() => Ok(None),
@@ -795,15 +790,18 @@ impl AppleClient {
     /// `library` relationship, so the library is searched for the artist's name and the hit
     /// whose catalog artist is this one is kept.
     async fn library_artist(&self, id: &str) -> Result<Option<String>> {
-        let artist = self
+        let body = self
             .get(
                 &self.catalog(&format!("/artists/{}", escape::component(id))),
                 &[("fields[artists]", "name")],
             )
             .await?;
+        let artist: wire::Answer = wire::answer(&body);
         let name = artist
-            .pointer("/data/0/attributes/name")
-            .and_then(Value::as_str)
+            .data
+            .first()
+            .and_then(|row| row.attributes.as_ref())
+            .and_then(|attributes| attributes.name.as_str())
             .with_context(|| format!("apple music has no artist {id}"))?;
         let limit = HITS.to_string();
         let found = self
@@ -817,21 +815,7 @@ impl AppleClient {
                 ],
             )
             .await?;
-        Ok(wire::library_artist(&found, id))
-    }
-
-    /// A catalog song, with its artists and album so both are somewhere to go.
-    async fn song(&self, id: &str) -> Result<Value> {
-        let answered = self
-            .get(
-                &self.catalog(&format!("/songs/{}", escape::component(id))),
-                &[("include[songs]", "artists,albums")],
-            )
-            .await?;
-        answered
-            .pointer("/data/0")
-            .cloned()
-            .with_context(|| format!("apple music has no song {id}"))
+        Ok(wire::library_artist(&wire::answer(&found), id))
     }
 
     /// The catalog's length and loudness for a song, from one lookup that asks for nothing
@@ -852,26 +836,29 @@ impl AppleClient {
                 ],
             )
             .await;
-        let song = match answered {
-            Ok(answered) => answered.pointer("/data/0").cloned().unwrap_or_default(),
+        let body = match answered {
+            Ok(body) => body,
             Err(error) => {
                 log::debug!("apple: cannot read the details of {id}: {error:#}");
                 return Details::default();
             }
         };
+        let answered: wire::Answer = wire::answer(&body);
+        let song = answered.data.first();
         let duration = song
-            .pointer("/attributes/durationInMillis")
-            .and_then(Value::as_u64)
+            .and_then(|song| song.attributes.as_ref())
+            .and_then(|attributes| attributes.duration_in_millis.as_u64())
             .filter(|millis| *millis > 0)
             .map(Duration::from_millis);
-        let main = song.pointer("/relationships/audio-analysis/data/0/attributes/loudness/main");
+        let main = song
+            .and_then(|song| song.relationships.audio_analysis.rows().first())
+            .and_then(|analysis| analysis.attributes.as_ref())
+            .map(|attributes| &attributes.loudness.main);
         let lufs = main
-            .and_then(|main| main.get("value"))
-            .and_then(Value::as_f64)
+            .and_then(|main| main.value.as_f64())
             .filter(|lufs| (-70.0..0.0).contains(lufs));
         let peak = main
-            .and_then(|main| main.get("peak"))
-            .and_then(Value::as_f64)
+            .and_then(|main| main.peak.as_f64())
             .map(|dbfs| 10f64.powf(dbfs / 20.0) as f32);
         let loudness = lufs.map(|lufs| Loudness {
             lufs: lufs as f32,
@@ -894,22 +881,20 @@ impl AppleClient {
                 ],
             )
             .await;
-        let answered = match answered {
+        let body = match answered {
             Err(error) if error.is::<Missing>() => return Ok((Vec::new(), None, Some(0))),
             answered => answered?,
         };
-        let tracks = answered
-            .get("data")
-            .and_then(Value::as_array)
-            .map(|rows| rows.iter().filter_map(wire::playlist_track).collect())
-            .unwrap_or_default();
-        let next = answered
-            .get("next")
-            .and_then(Value::as_str)
+        let outline = wire::outline(&body);
+        let tracks = outline.read(&wire::playlist_track);
+        let next = outline
+            .next
+            .as_str()
             .map(|next| next.trim_start_matches("/v1").to_owned());
-        let total = answered
-            .pointer("/meta/total")
-            .and_then(Value::as_u64)
+        let total = outline
+            .meta
+            .total
+            .as_u64()
             .and_then(|total| u32::try_from(total).ok());
         Ok((tracks, next, total))
     }
@@ -920,17 +905,19 @@ impl AppleClient {
         if !Self::is_mine(artist_id) {
             return Ok(artist_id.to_owned());
         }
-        self.get(
-            &format!("/me/library/artists/{}", escape::component(artist_id)),
-            &[("include", "catalog")],
-        )
-        .await?
-        .pointer("/data/0")
-        .and_then(wire::catalog)
-        .and_then(|found| found.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .context("this library artist has no page in the catalog")
+        let body = self
+            .get(
+                &format!("/me/library/artists/{}", escape::component(artist_id)),
+                &[("include", "catalog")],
+            )
+            .await?;
+        wire::answer::<IgnoredAny>(&body)
+            .data
+            .first()
+            .and_then(wire::catalog)
+            .and_then(|found| found.id.as_str())
+            .map(str::to_owned)
+            .context("this library artist has no page in the catalog")
     }
 
     /// Whether an id belongs to the listener's own library rather than the catalog.
@@ -947,7 +934,7 @@ impl AppleClient {
     /// only and a suggestion without ids leads nowhere.
     async fn seed_station(&self, track_id: &str) -> Result<(String, Vec<Track>)> {
         let limit = STATION.to_string();
-        let answered = self
+        let body = self
             .post(
                 "/me/stations/continuous",
                 &[
@@ -960,16 +947,20 @@ impl AppleClient {
                 })),
             )
             .await?;
+        let answered: wire::Answer<wire::Seeded> = wire::answer(&body);
         let station = answered
-            .pointer("/results/station/id")
-            .and_then(Value::as_str)
+            .results
+            .station
+            .id
+            .as_str()
             .context("apple built no station for that track")?
             .to_owned();
         let tracks = answered
-            .pointer("/results/tracks")
-            .and_then(Value::as_array)
-            .map(|rows| rows.iter().filter_map(wire::song).collect())
-            .unwrap_or_default();
+            .results
+            .tracks
+            .iter()
+            .filter_map(wire::song)
+            .collect();
         Ok((station, tracks))
     }
 
@@ -977,18 +968,15 @@ impl AppleClient {
     /// as the queue needs filling.
     async fn station_tracks(&self, station: &str) -> Result<Vec<Track>> {
         let limit = STATION.to_string();
-        let answered = self
+        let body = self
             .post(
                 &format!("/me/stations/next-tracks/{}", escape::component(station)),
                 &[("limit", &limit), ("include[songs]", "artists,albums")],
                 None,
             )
             .await?;
-        Ok(answered
-            .get("data")
-            .and_then(Value::as_array)
-            .map(|rows| rows.iter().filter_map(wire::song).collect())
-            .unwrap_or_default())
+        let answered: wire::Answer = wire::answer(&body);
+        Ok(answered.data.iter().filter_map(wire::song).collect())
     }
 
     /// The station this client is part way through, if it was seeded by `track_id`.
@@ -1017,34 +1005,24 @@ impl AppleClient {
         if let Some(genre) = genre {
             query.push(("genre", genre));
         }
-        let answered = self.get(&self.catalog("/charts"), &query).await?;
+        let body = self.get(&self.catalog("/charts"), &query).await?;
+        let answered: wire::Answer<wire::Charts> = wire::answer(&body);
+        let charts = &answered.results;
         let mut sections = Vec::new();
-        for (kind, title) in [
-            ("playlists", "Top playlists"),
-            ("albums", "Top albums"),
-            ("songs", "Top songs"),
+        for (kind, title, charts) in [
+            ("playlists", "Top playlists", &charts.playlists),
+            ("albums", "Top albums", &charts.albums),
+            ("songs", "Top songs", &charts.songs),
         ] {
-            let items: Vec<GenreItem> = answered
-                .pointer(&format!("/results/{kind}"))
-                .and_then(Value::as_array)
-                .map(|charts| {
-                    charts
-                        .iter()
-                        .flat_map(|chart| {
-                            chart
-                                .get("data")
-                                .and_then(Value::as_array)
-                                .map(Vec::as_slice)
-                                .unwrap_or_default()
-                        })
-                        .filter_map(|row| match kind {
-                            "playlists" => wire::playlist(row).map(GenreItem::Playlist),
-                            "songs" => wire::song(row).map(GenreItem::Track),
-                            _ => wire::album(row).map(GenreItem::Album),
-                        })
-                        .collect()
+            let items: Vec<GenreItem> = charts
+                .iter()
+                .flat_map(wire::Relation::rows)
+                .filter_map(|row| match kind {
+                    "playlists" => wire::playlist(row).map(GenreItem::Playlist),
+                    "songs" => wire::song(row).map(GenreItem::Track),
+                    _ => wire::album(row).map(GenreItem::Album),
                 })
-                .unwrap_or_default();
+                .collect();
             if !items.is_empty() {
                 sections.push(GenreSection {
                     title: title.to_owned(),
@@ -1079,17 +1057,18 @@ impl MusicApi for AppleClient {
     /// The account, named and pictured from the listener's Apple Music profile when they have
     /// one; otherwise the service name with no picture. A missing profile never fails sign-in.
     async fn profile(&self) -> Result<UserProfile> {
-        let social = match self.get("/me/social-profile", &[]).await {
-            Ok(answered) => answered,
+        let body = match self.get("/me/social-profile", &[]).await {
+            Ok(body) => body,
             // No social profile on the account: the service name and no picture still sign in.
             Err(error) => {
                 log::debug!("apple: no social profile for this account: {error:#}");
-                Value::Null
+                String::new()
             }
         };
-        let attributes = social.pointer("/data/0/attributes");
+        let social: wire::Answer = wire::answer(&body);
+        let attributes = social.data.first().and_then(|row| row.attributes.as_ref());
         let display_name = attributes
-            .and_then(|attributes| wire::text(attributes, "name"))
+            .and_then(|attributes| wire::text(&attributes.name))
             .unwrap_or_else(|| "Apple Music".to_owned());
         let avatar = attributes.and_then(|attributes| wire::artwork(attributes, wire::ART));
         Ok(UserProfile {
@@ -1101,7 +1080,7 @@ impl MusicApi for AppleClient {
 
     async fn search(&self, query: &str) -> Result<Vec<Track>> {
         let limit = HITS.to_string();
-        let answered = self
+        let body = self
             .get(
                 &self.catalog("/search"),
                 &[
@@ -1112,16 +1091,19 @@ impl MusicApi for AppleClient {
                 ],
             )
             .await?;
+        let answered: wire::Answer<wire::Search> = wire::answer(&body);
         Ok(answered
-            .pointer("/results/songs/data")
-            .and_then(Value::as_array)
-            .map(|songs| songs.iter().filter_map(wire::song).collect())
-            .unwrap_or_default())
+            .results
+            .songs
+            .rows()
+            .iter()
+            .filter_map(wire::song)
+            .collect())
     }
 
     async fn search_albums(&self, query: &str) -> Result<Vec<Album>> {
         let limit = HITS.to_string();
-        let answered = self
+        let body = self
             .get(
                 &self.catalog("/search"),
                 &[
@@ -1132,31 +1114,48 @@ impl MusicApi for AppleClient {
                 ],
             )
             .await?;
+        let answered: wire::Answer<wire::Search> = wire::answer(&body);
         Ok(answered
-            .pointer("/results/albums/data")
-            .and_then(Value::as_array)
-            .map(|albums| albums.iter().filter_map(wire::album).collect())
-            .unwrap_or_default())
+            .results
+            .albums
+            .rows()
+            .iter()
+            .filter_map(wire::album)
+            .collect())
     }
 
     async fn search_playlists(&self, query: &str) -> Result<Vec<Playlist>> {
         let limit = HITS.to_string();
-        let answered = self
+        let body = self
             .get(
                 &self.catalog("/search"),
                 &[("term", query), ("types", "playlists"), ("limit", &limit)],
             )
             .await?;
+        let answered: wire::Answer<wire::Search> = wire::answer(&body);
         Ok(answered
-            .pointer("/results/playlists/data")
-            .and_then(Value::as_array)
-            .map(|playlists| playlists.iter().filter_map(wire::playlist).collect())
-            .unwrap_or_default())
+            .results
+            .playlists
+            .rows()
+            .iter()
+            .filter_map(wire::playlist)
+            .collect())
     }
 
+    /// A catalog song, with its artists and album so both are somewhere to go.
     async fn track(&self, track_id: &str) -> Result<Track> {
-        let found = self.song(track_id).await?;
-        wire::song(&found).with_context(|| format!("cannot read the apple song {track_id}"))
+        let body = self
+            .get(
+                &self.catalog(&format!("/songs/{}", escape::component(track_id))),
+                &[("include[songs]", "artists,albums")],
+            )
+            .await?;
+        let answered: wire::Answer = wire::answer(&body);
+        let found = answered
+            .data
+            .first()
+            .with_context(|| format!("apple music has no song {track_id}"))?;
+        wire::song(found).with_context(|| format!("cannot read the apple song {track_id}"))
     }
 
     async fn track_playcount(&self, _track_id: &str) -> Result<Option<u64>> {
@@ -1188,17 +1187,16 @@ impl MusicApi for AppleClient {
                 ],
             )
             .await
-            .ok();
-        let data = song
-            .as_ref()
-            .and_then(|answered| answered.pointer("/data/0"));
+            .unwrap_or_default();
+        let answered: wire::Answer = wire::answer(&song);
+        let data = answered.data.first();
         let duration = data
-            .and_then(|song| song.pointer("/attributes/durationInMillis"))
-            .and_then(Value::as_u64)
+            .and_then(|song| song.attributes.as_ref())
+            .and_then(|attributes| attributes.duration_in_millis.as_u64())
             .unwrap_or(0);
         let album = data
-            .and_then(|song| song.pointer("/relationships/albums/data/0/id"))
-            .and_then(Value::as_str);
+            .and_then(|song| song.relationships.albums.rows().first())
+            .and_then(|album| album.id.as_str());
         // MusicKit mints a persistent id per play; a random 64-bit hex stands in the same way.
         let persistent = format!("{:016x}", fastrand::u64(..));
         let mut item = serde_json::json!({
@@ -1247,7 +1245,7 @@ impl MusicApi for AppleClient {
     /// The account's recently played songs across every device, newest first. Only songs are
     /// kept; stations and music videos the list can also carry are dropped.
     async fn recently_played(&self) -> Result<Vec<Track>> {
-        let answered = self
+        let body = self
             .get(
                 "/me/recent/played/tracks",
                 &[
@@ -1257,11 +1255,8 @@ impl MusicApi for AppleClient {
                 ],
             )
             .await?;
-        Ok(answered
-            .pointer("/data")
-            .and_then(Value::as_array)
-            .map(|rows| rows.iter().filter_map(wire::song).collect())
-            .unwrap_or_default())
+        let answered: wire::Answer = wire::answer(&body);
+        Ok(answered.data.iter().filter_map(wire::song).collect())
     }
 
     /// The songs the listener has added. Only the ones with a catalog id are listed: an upload
@@ -1342,17 +1337,15 @@ impl MusicApi for AppleClient {
         let limit = PAGE.to_string();
         let mut query = PINS_QUERY.to_vec();
         query.push(("limit", &limit));
-        let answered = self.get(PINS, &query).await?;
+        let body = self.get(PINS, &query).await?;
+        let answered: wire::Answer = wire::answer(&body);
         let pins = wire::pins(&answered, OWNER);
         *self.remembered() = Pinned {
             ids: pins
                 .iter()
                 .map(|(id, target)| (target.uri.clone(), id.clone()))
                 .collect(),
-            count: answered
-                .get("data")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len),
+            count: answered.data.len(),
         };
         Ok(Some(pins.into_iter().map(|(_, target)| target).collect()))
     }
@@ -1466,23 +1459,23 @@ impl MusicApi for AppleClient {
                 ],
             ),
         };
-        let answered = self.get(&path, &query).await?;
+        let body = self.get(&path, &query).await?;
+        let answered: wire::Answer = wire::answer(&body);
         let found = answered
-            .pointer("/data/0")
+            .data
+            .first()
             .context("apple music has no such album")?;
         // A library album's own rows are library songs; a catalog album's are catalog songs.
         let tracks = found
-            .pointer("/relationships/tracks/data")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| match row.get("type").and_then(Value::as_str) {
-                        Some("library-songs") => wire::library_song(row),
-                        _ => wire::song(row),
-                    })
-                    .collect()
+            .relationships
+            .tracks
+            .rows()
+            .iter()
+            .filter_map(|row| match row.kind.as_str() {
+                Some("library-songs") => wire::library_song(row),
+                _ => wire::song(row),
             })
-            .unwrap_or_default();
+            .collect();
         let album = match Self::is_mine(album_id) {
             true => wire::library_album(found).or_else(|| wire::album(found)),
             false => wire::album(found),
@@ -1507,7 +1500,7 @@ impl MusicApi for AppleClient {
 
     async fn artist(&self, artist_id: &str) -> Result<Artist> {
         let id = self.catalog_artist(artist_id).await?;
-        let answered = self
+        let body = self
             .get(
                 &self.catalog(&format!("/artists/{}", escape::component(&id))),
                 &[
@@ -1521,8 +1514,10 @@ impl MusicApi for AppleClient {
                 ],
             )
             .await?;
+        let answered: wire::Answer = wire::answer(&body);
         answered
-            .pointer("/data/0")
+            .data
+            .first()
             .and_then(wire::artist)
             .with_context(|| format!("cannot read the apple artist {id}"))
     }
@@ -1532,14 +1527,16 @@ impl MusicApi for AppleClient {
     }
 
     async fn artist_profile(&self, artist_id: &str) -> Result<ArtistProfile> {
-        let answered = self
+        let body = self
             .get(
                 &self.catalog(&format!("/artists/{}", escape::component(artist_id))),
                 &[("extend", "artistBio")],
             )
             .await?;
+        let answered: wire::Answer = wire::answer(&body);
         answered
-            .pointer("/data/0")
+            .data
+            .first()
             .and_then(wire::artist_profile)
             .with_context(|| format!("cannot read the apple artist {artist_id}"))
     }
@@ -1558,20 +1555,17 @@ impl MusicApi for AppleClient {
                 .map(|id| id.as_str())
                 .collect::<Vec<_>>()
                 .join(",");
-            let answered = self
+            let body = self
                 .get(&self.catalog("/artists"), &[("ids", &joined)])
                 .await?;
-            let rows = answered
-                .get("data")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            for row in rows {
-                let Some(id) = row.get("id").and_then(Value::as_str) else {
+            let answered: wire::Answer = wire::answer(&body);
+            for row in &answered.data {
+                let Some(id) = row.id.as_str() else {
                     continue;
                 };
                 if let Some(art) = row
-                    .get("attributes")
+                    .attributes
+                    .as_ref()
                     .and_then(|attributes| wire::artwork(attributes, wire::ART))
                 {
                     found.insert(id.to_owned(), art);
@@ -1587,15 +1581,19 @@ impl MusicApi for AppleClient {
             true => format!("/me/library/playlists/{}", escape::component(playlist_id)),
             false => self.catalog(&format!("/playlists/{}", escape::component(playlist_id))),
         };
-        let answered = self.get(&path, &[]).await?;
-        let found = answered
-            .pointer("/data/0")
-            .context("apple music has no such playlist")?;
-        let playlist = match mine {
-            true => wire::library_playlist(found, OWNER),
-            false => wire::playlist(found),
-        }
-        .context("cannot read the apple playlist")?;
+        let playlist = {
+            let body = self.get(&path, &[]).await?;
+            let answered: wire::Answer = wire::answer(&body);
+            let found = answered
+                .data
+                .first()
+                .context("apple music has no such playlist")?;
+            match mine {
+                true => wire::library_playlist(found, OWNER),
+                false => wire::playlist(found),
+            }
+            .context("cannot read the apple playlist")?
+        };
         let (tracks, continuation, total) = self.playlist_page(&format!("{path}/tracks")).await?;
         // The total is what the header shows while the rest of a long playlist is still on its
         // way, so the count does not climb a page at a time.
@@ -1667,16 +1665,17 @@ impl MusicApi for AppleClient {
     }
 
     async fn create_playlist(&self, name: &str) -> Result<String> {
-        let answered = self
+        let body = self
             .post(
                 "/me/library/playlists",
                 &[],
                 Some(serde_json::json!({ "attributes": { "name": name } })),
             )
             .await?;
-        answered
-            .pointer("/data/0/id")
-            .and_then(Value::as_str)
+        wire::answer::<IgnoredAny>(&body)
+            .data
+            .first()
+            .and_then(|row| row.id.as_str())
             .map(str::to_owned)
             .context("apple music named no new playlist")
     }
@@ -1750,7 +1749,7 @@ impl MusicApi for AppleClient {
         let mut row = None;
         for page in 0..PAGES {
             let offset = (page * PAGE).to_string();
-            let answered = self
+            let body = self
                 .get(
                     &format!(
                         "/me/library/playlists/{}/tracks",
@@ -1759,22 +1758,18 @@ impl MusicApi for AppleClient {
                     &[("limit", &limit), ("offset", &offset)],
                 )
                 .await?;
-            let rows = answered
-                .get("data")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            row = rows
-                .iter()
+            let outline = wire::outline(&body);
+            row = outline
+                .rows()
                 .find(|row| {
-                    row.pointer("/attributes/playParams/catalogId")
-                        .and_then(Value::as_str)
+                    row.attributes
+                        .as_ref()
+                        .and_then(|attributes| attributes.play_params.as_ref())
+                        .and_then(|params| params.catalog_id.as_str())
                         == Some(track_id)
                 })
-                .and_then(|row| row.get("id"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            if row.is_some() || rows.is_empty() || answered.get("next").is_none() {
+                .and_then(|row| row.id.as_str().map(str::to_owned));
+            if row.is_some() || outline.data.is_empty() || !outline.next.is_present() {
                 break;
             }
         }
@@ -1794,41 +1789,39 @@ impl MusicApi for AppleClient {
     /// What Apple made for this listener: their recommendation groups, and the storefront
     /// charts underneath so the page is never empty.
     async fn home(&self) -> Result<HomeFeed> {
-        let answered = self
-            .get("/me/recommendations", &[("limit", "12"), ALBUM_ARTISTS])
-            .await?;
-        let mut sections = Vec::new();
-        let mut recents = Vec::new();
-        for group in answered
-            .get("data")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-        {
-            let title = group
-                .pointer("/attributes/title/stringForDisplay")
-                .and_then(Value::as_str)
-                .unwrap_or("For you")
-                .to_owned();
-            let items: Vec<GenreItem> = group
-                .pointer("/relationships/contents/data")
-                .and_then(Value::as_array)
-                .map(|rows| {
-                    rows.iter()
-                        .filter_map(|row| match row.get("type").and_then(Value::as_str) {
-                            Some("playlists") => wire::playlist(row).map(GenreItem::Playlist),
-                            Some("albums") => wire::album(row).map(GenreItem::Album),
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            match is_recents(group) {
-                true => recents = items,
-                false if !items.is_empty() => sections.push(GenreSection { title, items }),
-                false => {}
+        let (mut sections, recents) = {
+            let body = self
+                .get("/me/recommendations", &[("limit", "12"), ALBUM_ARTISTS])
+                .await?;
+            let answered: wire::Answer = wire::answer(&body);
+            let mut sections = Vec::new();
+            let mut recents = Vec::new();
+            for group in &answered.data {
+                let title = group
+                    .attributes
+                    .as_ref()
+                    .and_then(|attributes| attributes.title.string_for_display.as_str())
+                    .unwrap_or("For you")
+                    .to_owned();
+                let items: Vec<GenreItem> = group
+                    .relationships
+                    .contents
+                    .rows()
+                    .iter()
+                    .filter_map(|row| match row.kind.as_str() {
+                        Some("playlists") => wire::playlist(row).map(GenreItem::Playlist),
+                        Some("albums") => wire::album(row).map(GenreItem::Album),
+                        _ => None,
+                    })
+                    .collect();
+                match is_recents(group) {
+                    true => recents = items,
+                    false if !items.is_empty() => sections.push(GenreSection { title, items }),
+                    false => {}
+                }
             }
-        }
+            (sections, recents)
+        };
         if sections.is_empty() {
             sections = self.charts(None).await.unwrap_or_default();
         }
@@ -1862,12 +1855,14 @@ impl MusicApi for AppleClient {
     async fn genres(&self) -> Result<Vec<Genre>> {
         let genres = self
             .walk(&self.catalog("/genres"), PAGE, &[], |row| {
-                let attributes = row.get("attributes")?;
+                let attributes = row.attributes.as_ref()?;
                 // Every real genre hangs off "Music", which is not one itself.
-                attributes.get("parentId")?;
+                if !attributes.parent_id.is_present() {
+                    return None;
+                }
                 Some(Genre {
-                    id: row.get("id")?.as_str()?.to_owned(),
-                    name: wire::text(attributes, "name")?,
+                    id: row.id.as_str()?.to_owned(),
+                    name: wire::text(&attributes.name)?,
                     cover: None,
                 })
             })
@@ -1876,15 +1871,17 @@ impl MusicApi for AppleClient {
     }
 
     async fn genre(&self, genre_id: &str) -> Result<GenreDetail> {
-        let answered = self
+        let body = self
             .get(
                 &self.catalog(&format!("/genres/{}", escape::component(genre_id))),
                 &[],
             )
             .await?;
-        let name = answered
-            .pointer("/data/0/attributes/name")
-            .and_then(Value::as_str)
+        let name = wire::answer::<IgnoredAny>(&body)
+            .data
+            .first()
+            .and_then(|row| row.attributes.as_ref())
+            .and_then(|attributes| attributes.name.as_str())
             .unwrap_or_default()
             .to_owned();
         Ok(GenreDetail {
@@ -1962,17 +1959,8 @@ fn backoff(tried: u32) -> Duration {
 }
 
 /// The id of a library row, which is the library's own rather than the catalog's.
-fn library_id(row: &Value) -> Option<String> {
-    row.get("id")?.as_str().map(str::to_owned)
-}
-
-/// The `data` array of an answer, empty when it carries none.
-fn rows(answered: &Value) -> &[Value] {
-    answered
-        .get("data")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
+fn library_id(row: &Resource) -> Option<String> {
+    row.id.as_str().map(str::to_owned)
 }
 
 /// An answer body as a tree, or null when it is empty or not JSON.
@@ -1981,25 +1969,6 @@ fn parse(text: &str) -> Value {
         true => Value::Null,
         false => serde_json::from_str(text).unwrap_or(Value::Null),
     }
-}
-
-/// The outline of a page body, empty when it is not the JSON a listing answers with.
-fn shape(body: &str) -> Shape<'_> {
-    serde_json::from_str(body).unwrap_or_default()
-}
-
-/// The rows of one page body read through `read`. Each row is parsed on its own and dropped as
-/// soon as `read` is done with it, so a page never exists as one whole tree.
-fn read_page<T, F>(body: &str, read: &F) -> Vec<T>
-where
-    F: Fn(&Value) -> Option<T> + ?Sized,
-{
-    shape(body)
-        .data
-        .iter()
-        .filter_map(|row| serde_json::from_str::<Value>(row.get()).ok())
-        .filter_map(|row| read(&row))
-        .collect()
 }
 
 /// The recently played part of Quick picks: the albums and playlists recent plays came from in
@@ -2049,8 +2018,12 @@ fn recent_mix(containers: Vec<GenreItem>, songs: Vec<Track>) -> Vec<GenreItem> {
 
 /// Whether a recommendation group is the account's recently played one, which Quick picks
 /// replace. Its title is in the storefront's language, so only its kind is checked.
-fn is_recents(group: &Value) -> bool {
-    group.pointer("/attributes/kind").and_then(Value::as_str) == Some("recently-played")
+fn is_recents(group: &Resource) -> bool {
+    group
+        .attributes
+        .as_ref()
+        .and_then(|attributes| attributes.kind.as_str())
+        == Some("recently-played")
 }
 
 #[cfg(test)]
