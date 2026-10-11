@@ -1,14 +1,14 @@
 //! What an artist or an album page fills in behind its own rows, from the views the
-//! web player reads its own rails off: the appears-on view of an artist, and the
-//! related-albums view of an album with more from the same artist and its neighbours
-//! beside it. A view that comes back empty leaves its rail off the page rather than
-//! failing it.
+//! web player reads its own rails off: the whole discography and the appears-on view of an
+//! artist, and the related-albums view of an album with more from the same artist and its
+//! neighbours beside it. A view that comes back empty leaves its rail off the page rather
+//! than failing it.
 
 use std::collections::HashSet;
 
 use anyhow::{Context as _, Result};
 
-use crate::apple::client::AppleClient;
+use crate::apple::client::{ALBUM_ARTISTS, AppleClient};
 use crate::apple::wire;
 use crate::escape;
 use crate::{Album, AlbumCatalogue, ArtistCatalogue, SUGGESTIONS, SavedArtist};
@@ -18,23 +18,42 @@ use crate::{Album, AlbumCatalogue, ArtistCatalogue, SUGGESTIONS, SavedArtist};
 const SIMILAR_ARTISTS: usize = 6;
 const SIMILAR_RELEASES: usize = 2;
 
-/// The appears-on view of one artist, read in a single request once a library id has been
-/// turned into the catalog's.
+/// The most releases one request for a whole view may ask for, which is all Apple allows, and
+/// how many such pages a discography may take.
+const VIEW_PAGE: usize = 100;
+const VIEW_PAGES: usize = 10;
+
+/// The whole discography and the appears-on view of one artist, once a library id has been
+/// turned into the catalog's. The artist page itself holds only the first ten releases of each
+/// view. A discography that cannot be read leaves those on the page.
 pub(crate) async fn artist_catalogue(
     client: &AppleClient,
     artist_id: &str,
 ) -> Result<ArtistCatalogue> {
     let artist_id = client.catalog_artist(artist_id).await?;
-    let answered = client
-        .get(
-            &client.catalog(&format!("/artists/{}", escape::component(&artist_id))),
-            &[("views", "appears-on-albums")],
-        )
-        .await?;
+    let path = client.catalog(&format!("/artists/{}", escape::component(&artist_id)));
+    let views = wire::DISCOGRAPHY
+        .iter()
+        .map(|name| whole_view(client, &artist_id, name));
+    let (answered, views) = tokio::join!(
+        client.get(&path, &[("views", "appears-on-albums"), ALBUM_ARTISTS]),
+        futures::future::try_join_all(views),
+    );
+    let body = answered?;
+    let answered: wire::Answer = wire::answer(&body);
+    let albums = match views {
+        Ok(views) => views.into_iter().flatten().collect(),
+        Err(error) => {
+            log::warn!("apple: cannot read the discography of {artist_id}: {error:#}");
+            Vec::new()
+        }
+    };
     let found = answered
-        .pointer("/data/0")
+        .data
+        .first()
         .context("apple music has no such artist")?;
     Ok(ArtistCatalogue {
+        albums,
         appears_on: wire::view(found, "appears-on-albums")
             .iter()
             .filter_map(wire::album)
@@ -50,15 +69,17 @@ async fn related_albums(client: &AppleClient, album_id: &str) -> Result<Vec<Albu
     if AppleClient::is_mine(album_id) {
         return Ok(Vec::new());
     }
-    let answered = client
+    let body = client
         .get(
             &client.catalog(&format!("/albums/{}", escape::component(album_id))),
-            &[("views", "related-albums")],
+            &[("views", "related-albums"), ALBUM_ARTISTS],
         )
         .await
         .context("cannot read the related albums")?;
+    let answered: wire::Answer = wire::answer(&body);
     let found = answered
-        .pointer("/data/0")
+        .data
+        .first()
         .context("apple music has no such album")?;
     Ok(wire::view(found, "related-albums")
         .iter()
@@ -75,15 +96,20 @@ async fn more_from_artist(
     artist_id: &str,
 ) -> Result<(Vec<Album>, Vec<SavedArtist>)> {
     let artist_id = &client.catalog_artist(artist_id).await?;
-    let answered = client
+    let body = client
         .get(
             &client.catalog(&format!("/artists/{}", escape::component(artist_id))),
-            &[("views", "full-albums,singles,similar-artists")],
+            &[
+                ("views", "full-albums,singles,similar-artists"),
+                ALBUM_ARTISTS,
+            ],
         )
         .await
         .context("cannot read more from this artist")?;
+    let answered: wire::Answer = wire::answer(&body);
     let found = answered
-        .pointer("/data/0")
+        .data
+        .first()
         .context("apple music has no such artist")?;
     let more = wire::view(found, "full-albums")
         .iter()
@@ -100,15 +126,17 @@ async fn more_from_artist(
 
 /// A few releases by one similar artist, skipping the page's own album.
 async fn releases_by(client: &AppleClient, album_id: &str, artist_id: &str) -> Result<Vec<Album>> {
-    let answered = client
+    let body = client
         .get(
             &client.catalog(&format!("/artists/{}", escape::component(artist_id))),
-            &[("views", "full-albums,singles")],
+            &[("views", "full-albums,singles"), ALBUM_ARTISTS],
         )
         .await
         .with_context(|| format!("cannot read releases by similar artist {artist_id}"))?;
+    let answered: wire::Answer = wire::answer(&body);
     let found = answered
-        .pointer("/data/0")
+        .data
+        .first()
         .with_context(|| format!("apple music has no such artist {artist_id}"))?;
     Ok(wire::view(found, "full-albums")
         .iter()
@@ -191,4 +219,31 @@ pub(crate) async fn album_catalogue(
         also_like: liked,
         similar: similar.into_iter().take(SUGGESTIONS).collect(),
     })
+}
+
+/// Every release in one of an artist's views, read `VIEW_PAGE` at a time until Apple names no
+/// next page.
+async fn whole_view(client: &AppleClient, artist_id: &str, name: &str) -> Result<Vec<Album>> {
+    let path = client.catalog(&format!(
+        "/artists/{}/view/{name}",
+        escape::component(artist_id)
+    ));
+    let limit = VIEW_PAGE.to_string();
+    let mut albums = Vec::new();
+    for page in 0..VIEW_PAGES {
+        let offset = (page * VIEW_PAGE).to_string();
+        let body = client
+            .get(
+                &path,
+                &[("limit", &limit), ("offset", &offset), ALBUM_ARTISTS],
+            )
+            .await
+            .with_context(|| format!("cannot read the {name} of artist {artist_id}"))?;
+        let outline = wire::outline(&body);
+        albums.extend(outline.read(&wire::album));
+        if !outline.next.is_present() {
+            break;
+        }
+    }
+    Ok(albums)
 }
