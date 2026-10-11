@@ -28,6 +28,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   library and on artist pages.
 - Top songs on Apple Music charts now show and play as songs instead of album cards.
 - The Appears on row of an artist page no longer sits flush against the Show all button.
+- Dragging a track to the top of the queue now moves it whenever the drop line shows, even if
+  you let go over the Up next heading or between two rows.
 - Seeking in the last few seconds of a song now moves within that song, instead of jumping into
   the next one or doing nothing.
 - The fullscreen controls blur away as they hide, instead of leaving the top of the seek bar cut
