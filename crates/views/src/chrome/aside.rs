@@ -228,6 +228,15 @@ struct RowLook {
     drop_line: Option<Edge>,
 }
 
+/// The credit under a sheet, resolved once for the answer it names and the language it was read
+/// in, since the sheet redraws every frame while a song plays.
+struct Credit {
+    source: &'static str,
+    writers: Vec<String>,
+    language: i18n::Language,
+    lines: (SharedString, Option<SharedString>),
+}
+
 #[derive(Clone)]
 struct ContextMenuState {
     track: Track,
@@ -311,6 +320,7 @@ pub(crate) struct Aside {
     sweeping: Option<Task<()>>,
     showed: bool,
     resolving: bool,
+    credit: Option<Credit>,
 }
 
 impl Aside {
@@ -405,6 +415,7 @@ impl Aside {
             sweeping: None,
             showed: false,
             resolving: false,
+            credit: None,
         }
     }
 
@@ -976,11 +987,29 @@ impl Aside {
         let singing = matches!(self.playback.read(cx).state(), PlaybackState::Playing);
         let lyrics = self.lyrics.read(cx);
         let state = lyrics.state().clone();
-        let shown = lyrics.current().map(|hit| hit.lyrics.clone());
-        let credit = lyrics
-            .current()
-            .map(|hit| (hit.source, hit.writers.clone()));
-        let following = lyrics.following().map(str::to_owned);
+        let shown = lyrics.current().is_some();
+        let lines = match (&state, lyrics.current().map(|hit| &hit.lyrics)) {
+            (LyricsState::Ready, Some(music::Lyrics::Synced { lines })) => Some(lines.clone()),
+            _ => None,
+        };
+        if let Some(hit) = lyrics.current() {
+            let language = i18n::language();
+            let fresh = self.credit.as_ref().is_some_and(|credit| {
+                credit.source == hit.source
+                    && credit.writers == hit.writers
+                    && credit.language == language
+            });
+            if !fresh {
+                self.credit = Some(Credit {
+                    source: hit.source,
+                    writers: hit.writers.clone(),
+                    language,
+                    lines: credit_lines(hit.source, &hit.writers),
+                });
+            }
+        }
+        let following = (self.verse_of.as_deref() != lyrics.following())
+            .then(|| lyrics.following().map(str::to_owned));
         let take = lyrics.revision();
         let (karaoke_lyrics, romanization_scripts) = {
             let settings = self.settings.read(cx);
@@ -1010,7 +1039,7 @@ impl Aside {
             from: gpui::point(0., 0.5),
         };
 
-        if self.verse_of != following {
+        if let Some(following) = following {
             self.verse_of = following;
             self.verse_take = take;
             self.forget_verse();
@@ -1027,16 +1056,12 @@ impl Aside {
             self.forget_verse();
             self.anchor_verse();
         }
-        self.showed = shown.is_some();
+        self.showed = shown;
 
         let empty = |key: &'static str, cx: &mut Context<Self>| {
             vacant(i18n::lookup(key, None), cx)
                 .flex_1()
                 .into_any_element()
-        };
-        let lines = match (&state, &shown) {
-            (LyricsState::Ready, Some(music::Lyrics::Synced { lines })) => Some(lines.clone()),
-            _ => None,
         };
 
         // aim before reading
@@ -1123,7 +1148,7 @@ impl Aside {
                 if hazing && scroll.bounds_for_item(0).is_none() {
                     window.request_animation_frame();
                 }
-                let mut rendered = Vec::with_capacity(lyric_row_count(lines));
+                let mut rendered = Vec::with_capacity(lyric_row_count(lines) + 1);
 
                 for (index, line) in lines.iter().enumerate() {
                     let seek = line.start;
@@ -1412,27 +1437,31 @@ impl Aside {
 
                 rendered
             }
-            (None, LyricsState::Ready) => match &shown {
-                Some(music::Lyrics::Plain { text, romanized }) => vec![
-                    div()
-                        .w_full()
-                        .max_w(reach)
-                        .px_2()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .text_size(lane_size)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.muted_foreground)
-                        .child(SharedString::from(text.clone()))
-                        .when_some(
-                            selected_romanization(romanized, romanization_scripts),
-                            |this, text| this.child(romanized_lyrics_lane(text, lane_size, &theme)),
-                        )
-                        .into_any_element(),
-                ],
-                _ => vec![wordless("lyrics-missing", "icons/mic-off.svg")],
-            },
+            (None, LyricsState::Ready) => {
+                match self.lyrics.read(cx).current().map(|hit| &hit.lyrics) {
+                    Some(music::Lyrics::Plain { text, romanized }) => vec![
+                        div()
+                            .w_full()
+                            .max_w(reach)
+                            .px_2()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .text_size(lane_size)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child(SharedString::from(text.clone()))
+                            .when_some(
+                                selected_romanization(romanized, romanization_scripts),
+                                |this, text| {
+                                    this.child(romanized_lyrics_lane(text, lane_size, &theme))
+                                },
+                            )
+                            .into_any_element(),
+                    ],
+                    _ => vec![wordless("lyrics-missing", "icons/mic-off.svg")],
+                }
+            }
             (None, LyricsState::Idle) => vec![empty("lyrics-idle", cx)],
             (None, LyricsState::Loading) => vec![empty("lyrics-loading", cx)],
             (None, LyricsState::Instrumental) => {
@@ -1450,7 +1479,8 @@ impl Aside {
         };
 
         if state == LyricsState::Ready
-            && let Some((source, writers)) = &credit
+            && shown
+            && let Some((from, by)) = self.credit.as_ref().map(|credit| credit.lines.clone())
         {
             let credit = body.len();
             let along = viewport_along(&scroll, credit, scroll.bounds(), drag.downward);
@@ -1469,14 +1499,8 @@ impl Aside {
                 .flex_col()
                 .text_size(theme.text(Text::Small))
                 .text_color(theme.muted_foreground)
-                .child(match *source == music::lyrics::LOCAL {
-                    true => t!("lyrics-source-local"),
-                    false => t!("lyrics-source", source = *source),
-                })
-                .when(!writers.is_empty(), |this| {
-                    let writers = writers.join(", ");
-                    this.child(t!("lyrics-writers", writers = writers.as_str()))
-                });
+                .child(from)
+                .children(by);
             body.push(adrift(note, translation, false, window));
         }
         if drifting {
@@ -2147,6 +2171,19 @@ fn selected_romanization(
     scripts?
         .contains(romanized.writing_system)
         .then(|| romanized.text.clone())
+}
+
+/// Which source a sheet came from and, when it names them, who wrote the song.
+fn credit_lines(source: &str, writers: &[String]) -> (SharedString, Option<SharedString>) {
+    let from = match source == music::lyrics::LOCAL {
+        true => t!("lyrics-source-local"),
+        false => t!("lyrics-source", source = source),
+    };
+    let by = (!writers.is_empty()).then(|| {
+        let writers = writers.join(", ");
+        t!("lyrics-writers", writers = writers.as_str())
+    });
+    (from, by)
 }
 
 fn romanized_lyrics_lane(text: String, size: Pixels, theme: &ui::Theme) -> Div {
