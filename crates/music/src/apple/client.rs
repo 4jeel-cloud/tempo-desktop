@@ -188,7 +188,48 @@ struct Pinned {
 /// One listing fetched, or still being fetched, and when it was first asked for.
 struct Listing {
     at: Instant,
-    rows: Arc<tokio::sync::OnceCell<Arc<Vec<Value>>>>,
+    bodies: Arc<tokio::sync::OnceCell<Arc<Bodies>>>,
+}
+
+/// The pages of a listing as the text Apple sent, and how many rows they hold between them.
+///
+/// A page body is one large block the allocator hands straight back to the system when it is
+/// dropped. The same rows parsed would be tens of thousands of small blocks, which leave holes
+/// in the heap the allocator keeps long after the listing is gone. A row is parsed only while a
+/// reader looks at it.
+#[derive(Default)]
+struct Bodies {
+    pages: Vec<Box<str>>,
+    rows: usize,
+}
+
+impl Bodies {
+    /// Every row of every page read through `read`, in order.
+    fn read<T, F>(&self, read: &F) -> Vec<T>
+    where
+        F: Fn(&Value) -> Option<T> + ?Sized,
+    {
+        self.pages
+            .iter()
+            .flat_map(|body| read_page(body, read))
+            .collect()
+    }
+}
+
+/// The parts of a page body a listing reads, with every row left as the text it arrived as.
+#[derive(Default, serde::Deserialize)]
+struct Shape<'a> {
+    #[serde(borrow, default)]
+    data: Vec<&'a serde_json::value::RawValue>,
+    #[serde(borrow, default)]
+    next: Option<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    meta: Option<Meta>,
+}
+
+#[derive(serde::Deserialize)]
+struct Meta {
+    total: Option<u64>,
 }
 
 /// A failure the gateway is answering for rather than the request: a connection that broke
@@ -267,7 +308,7 @@ impl AppleClient {
     }
 
     /// One request against the API, sent again with a growing wait while the gateway is what
-    /// failed rather than the request.
+    /// failed rather than the request. Answers with the body as Apple sent it.
     ///
     /// A read gets [`TRIES`] attempts. A write gets one: its answer may have been lost on the
     /// way back after Apple had already applied it, and adding a playlist twice is worse than
@@ -278,7 +319,7 @@ impl AppleClient {
         path: &str,
         query: &[(&str, &str)],
         body: Option<Value>,
-    ) -> Result<Value> {
+    ) -> Result<String> {
         let tries = match method == reqwest::Method::GET {
             true => TRIES,
             false => 1,
@@ -305,15 +346,15 @@ impl AppleClient {
         }
     }
 
-    /// One round trip, with nothing repeated. The account token rides on every request, and
-    /// neither token is ever logged.
+    /// One round trip, with nothing repeated, answering with the body text of a success. The
+    /// account token rides on every request, and neither token is ever logged.
     async fn send_once(
         &self,
         method: &reqwest::Method,
         path: &str,
         query: &[(&str, &str)],
         body: Option<&Value>,
-    ) -> Result<Value> {
+    ) -> Result<String> {
         let mut request = self
             .http
             .request(method.clone(), format!("{API}{path}"))
@@ -353,14 +394,11 @@ impl AppleClient {
                 .context(format!("cannot read the apple music answer for {path}"))
                 .context(Busy(after))
         })?;
-        let answered: Value = match text.trim().is_empty() {
-            true => Value::Null,
-            false => serde_json::from_str(&text).unwrap_or(Value::Null),
-        };
         if method != reqwest::Method::GET {
             self.forget();
         }
         if !status.is_success() {
+            let answered = parse(&text);
             // Apple says what it disliked in the body, which is the only way to tell a rejected
             // parameter from a rejected account.
             let detail = answered
@@ -375,15 +413,19 @@ impl AppleClient {
                 (false, false) => Err(refused),
             };
         }
-        Ok(answered)
+        Ok(text)
     }
 
     pub(crate) async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-        self.send(reqwest::Method::GET, path, query, None).await
+        self.send(reqwest::Method::GET, path, query, None)
+            .await
+            .map(|text| parse(&text))
     }
 
     async fn post(&self, path: &str, query: &[(&str, &str)], body: Option<Value>) -> Result<Value> {
-        self.send(reqwest::Method::POST, path, query, body).await
+        self.send(reqwest::Method::POST, path, query, body)
+            .await
+            .map(|text| parse(&text))
     }
 
     async fn patch(&self, path: &str, body: Value) -> Result<()> {
@@ -460,11 +502,11 @@ impl AppleClient {
     where
         F: Fn(&Value) -> Option<T>,
     {
-        let rows = self.listing(path, page, query).await?;
-        Ok(rows.iter().filter_map(read).collect())
+        let bodies = self.listing(path, page, query).await?;
+        Ok(bodies.read(&read))
     }
 
-    /// Every row of a paged listing, fetched once and kept for [`LISTING_TTL`].
+    /// Every page of a paged listing, fetched once and kept for [`LISTING_TTL`].
     ///
     /// The library pages and the favorites drawn over them read the same listings within
     /// seconds of each other, and a page costs about a second, so a second walk is the
@@ -475,10 +517,10 @@ impl AppleClient {
         path: &str,
         page: usize,
         query: &[(&str, &str)],
-    ) -> Result<Arc<Vec<Value>>> {
+    ) -> Result<Arc<Bodies>> {
         let cell = self.cell(path, page, query);
         cell.get_or_try_init(|| async {
-            self.pages::<Value>(path, page, query, None)
+            self.pages::<()>(path, page, query, None)
                 .await
                 .map(Arc::new)
         })
@@ -492,7 +534,7 @@ impl AppleClient {
         path: &str,
         page: usize,
         query: &[(&str, &str)],
-    ) -> Arc<tokio::sync::OnceCell<Arc<Vec<Value>>>> {
+    ) -> Arc<tokio::sync::OnceCell<Arc<Bodies>>> {
         let key = format!("{path}|{page}|{query:?}");
         let mut listings = self
             .listings
@@ -505,15 +547,15 @@ impl AppleClient {
                 self.expire();
                 Listing {
                     at: Instant::now(),
-                    rows: Arc::default(),
+                    bodies: Arc::default(),
                 }
             })
-            .rows
+            .bodies
             .clone()
     }
 
-    /// Drops the listings that have outlived [`LISTING_TTL`] once it has passed, so the rows of
-    /// a startup load leave memory without waiting for the next listing to be asked for.
+    /// Drops the listings that have outlived [`LISTING_TTL`] once it has passed, so the pages
+    /// of a startup load leave memory without waiting for the next listing to be asked for.
     fn expire(&self) {
         let listings = Arc::downgrade(&self.listings);
         tokio::spawn(async move {
@@ -530,7 +572,7 @@ impl AppleClient {
     /// A listing handed out a page at a time, read through `read`, on a channel that stays
     /// open until the last page. The first page carries the total when Apple says one.
     ///
-    /// The rows still go through the memo, so a caller right behind this one, the favorites
+    /// The pages still go through the memo, so a caller right behind this one, the favorites
     /// pass behind a library page, reads what this fetched. A listing the memo already holds
     /// arrives as one page.
     fn paged<T: Send + 'static>(
@@ -555,10 +597,11 @@ impl AppleClient {
                 })
                 .await;
             match fetched {
-                Ok(rows) if !streamed.load(std::sync::atomic::Ordering::Relaxed) => {
+                Ok(bodies) if !streamed.load(std::sync::atomic::Ordering::Relaxed) => {
+                    let items = bodies.read(&read);
                     sink.send(Ok(Page {
-                        total: Some(rows.len()),
-                        items: rows.iter().filter_map(read).collect(),
+                        total: Some(bodies.rows),
+                        items,
                     }))
                     .await
                     .ok();
@@ -580,8 +623,8 @@ impl AppleClient {
         }
     }
 
-    /// Fetches every page of a listing and hands back its rows in order. Stops at [`PAGES`]
-    /// pages so one enormous library cannot run away with the process.
+    /// Fetches every page of a listing and hands back their bodies in order. Stops at
+    /// [`PAGES`] pages so one enormous library cannot run away with the process.
     ///
     /// Only the first page is asked for on its own. A library listing answers it with
     /// `meta.total`, which says exactly how many pages are left, and they all go out together,
@@ -597,26 +640,29 @@ impl AppleClient {
         page: usize,
         query: &[(&str, &str)],
         sink: Option<Sink<'_, T>>,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<Bodies> {
         let limit = page.to_string();
         let mut asked: Vec<(&str, &str)> = query.to_vec();
         asked.push(("limit", &limit));
         let started = Instant::now();
 
-        let mut first = self.get(path, &asked).await?;
-        let total = first
-            .pointer("/meta/total")
-            .and_then(Value::as_u64)
-            .and_then(|total| usize::try_from(total).ok());
-        let more = first.get("next").is_some();
-        let mut collected = take_rows(&mut first);
-        drop(first);
-        let got = collected.len();
-        let mut spent = 1usize;
+        let first = self.body(path, &asked).await?;
+        let (total, more, got) = {
+            let shape = shape(&first);
+            let total = shape
+                .meta
+                .and_then(|meta| meta.total)
+                .and_then(|total| usize::try_from(total).ok());
+            (total, shape.next.is_some(), shape.data.len())
+        };
         if let Some((sink, read)) = sink {
-            let items = collected.iter().filter_map(read).collect();
+            let items = read_page(&first, read);
             sink.send(Ok(Page { total, items })).await.ok();
         }
+        let mut bodies = Bodies {
+            pages: vec![first],
+            rows: got,
+        };
         if got == page && more {
             let left = total.map_or(PAGES - 1, |total| {
                 total.saturating_sub(got).div_ceil(page).min(PAGES - 1)
@@ -628,32 +674,41 @@ impl AppleClient {
                     async move {
                         let mut asked: Vec<(&str, &str)> = asked.clone();
                         asked.push(("offset", at.as_str()));
-                        self.get(path, &asked).await
+                        self.body(path, &asked).await
                     }
                 })
                 .buffered(FAN);
-            while let Some(mut answered) = answers.try_next().await? {
-                spent += 1;
-                let more = answered.get("next").is_some();
-                let rows = take_rows(&mut answered);
-                drop(answered);
-                let last = rows.len() < page || !more;
+            while let Some(body) = answers.try_next().await? {
+                let (rows, more) = {
+                    let shape = shape(&body);
+                    (shape.data.len(), shape.next.is_some())
+                };
+                let last = rows < page || !more;
                 if let Some((sink, read)) = sink {
-                    let items = rows.iter().filter_map(read).collect();
+                    let items = read_page(&body, read);
                     sink.send(Ok(Page { total, items })).await.ok();
                 }
-                collected.extend(rows);
+                bodies.rows += rows;
+                bodies.pages.push(body);
                 if last {
                     break;
                 }
             }
         }
         log::debug!(
-            "apple: walked {path}: {} rows over {spent} page(s) in {} ms",
-            collected.len(),
+            "apple: walked {path}: {} rows over {} page(s) in {} ms",
+            bodies.rows,
+            bodies.pages.len(),
             started.elapsed().as_millis()
         );
-        Ok(collected)
+        Ok(bodies)
+    }
+
+    /// One page of a listing as the text Apple sent, left unparsed.
+    async fn body(&self, path: &str, query: &[(&str, &str)]) -> Result<Box<str>> {
+        self.send(reqwest::Method::GET, path, query, None)
+            .await
+            .map(String::into_boxed_str)
     }
 
     /// Keeps the library resources of one kind the listener has favorited, out of `items`
@@ -1580,7 +1635,7 @@ impl MusicApi for AppleClient {
                 None,
             )
             .await
-            .map(|rows| rows.iter().filter_map(wire::playlist_track).collect());
+            .map(|bodies| bodies.read(&wire::playlist_track));
         match walked {
             Err(error) if error.is::<Missing>() => Ok(Vec::new()),
             walked => walked,
@@ -1920,12 +1975,31 @@ fn rows(answered: &Value) -> &[Value] {
         .unwrap_or_default()
 }
 
-/// Moves the `data` array out of an answer, so its rows are kept without a copy.
-fn take_rows(answered: &mut Value) -> Vec<Value> {
-    match answered.get_mut("data").map(Value::take) {
-        Some(Value::Array(rows)) => rows,
-        _ => Vec::new(),
+/// An answer body as a tree, or null when it is empty or not JSON.
+fn parse(text: &str) -> Value {
+    match text.trim().is_empty() {
+        true => Value::Null,
+        false => serde_json::from_str(text).unwrap_or(Value::Null),
     }
+}
+
+/// The outline of a page body, empty when it is not the JSON a listing answers with.
+fn shape(body: &str) -> Shape<'_> {
+    serde_json::from_str(body).unwrap_or_default()
+}
+
+/// The rows of one page body read through `read`. Each row is parsed on its own and dropped as
+/// soon as `read` is done with it, so a page never exists as one whole tree.
+fn read_page<T, F>(body: &str, read: &F) -> Vec<T>
+where
+    F: Fn(&Value) -> Option<T> + ?Sized,
+{
+    shape(body)
+        .data
+        .iter()
+        .filter_map(|row| serde_json::from_str::<Value>(row.get()).ok())
+        .filter_map(|row| read(&row))
+        .collect()
 }
 
 /// The recently played part of Quick picks: the albums and playlists recent plays came from in
