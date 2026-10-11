@@ -9,7 +9,7 @@ use gpui::{
 use i18n::t;
 use music::SoundServer;
 use state::{AppSettings, Requirement, Requirements, Sonora, UpdateState, Updates};
-use ui::{ActiveTheme as _, Button, Text};
+use ui::{ActiveTheme as _, Button, SMALL_INSET, Text};
 
 const ICON: Pixels = px(18.);
 const REACH: Pixels = px(340.);
@@ -35,7 +35,7 @@ struct Card {
     silence: Handler,
     /// A link right under the detail, such as the release notes.
     link: Option<Button>,
-    /// What the card is about, in a row of its own above the never-again button.
+    /// What the card is about, in the bottom row after the never-again button.
     actions: Vec<Button>,
 }
 
@@ -127,25 +127,13 @@ impl AppNotice {
         });
 
         let close = self.updates.clone();
-        let later = self.updates.clone();
         let install = self.updates.clone();
         let silence = self.updates.clone();
         let settings = self.settings.clone();
         let notes = (!page.is_empty())
             .then(|| link(SharedString::from("update-notes"), t!("update-notes"), page));
-        let mut actions = Vec::new();
-        actions.push(
-            Button::new("update-later")
-                .outline()
-                .small()
-                .icon("icons/rotate-ccw-clock.svg")
-                .label(t!("update-later"))
-                .on_click(move |_, _, cx| {
-                    later.update(cx, |updates, cx| updates.dismiss(cx));
-                }),
-        );
-        if installable && !failed {
-            actions.push(
+        let actions = (installable && !failed)
+            .then(|| {
                 Button::new("update-now")
                     .primary()
                     .small()
@@ -156,9 +144,10 @@ impl AppNotice {
                     })
                     .on_click(move |_, _, cx| {
                         install.update(cx, |updates, cx| updates.install(cx));
-                    }),
-            );
-        }
+                    })
+            })
+            .into_iter()
+            .collect();
 
         Some(Card {
             id: "update",
@@ -206,8 +195,10 @@ impl Render for AppNotice {
     }
 }
 
-/// Draws one card: icon, title and a close button on top, then the detail with its link, the
-/// card's own actions, and the never-again button at the very bottom.
+/// Draws one card: icon, title and a close button on top, then the detail with its link, and
+/// the never-again button followed by the card's own actions at the bottom. The detail is inset
+/// as far as a small button's label, so it lines up with the buttons under it. The card takes
+/// every click and hover over it, so nothing under it reacts.
 fn card_element(card: Card, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let Card {
@@ -223,6 +214,7 @@ fn card_element(card: Card, cx: &App) -> AnyElement {
     } = card;
 
     div()
+        .occlude()
         .flex()
         .flex_col()
         .gap_2()
@@ -271,41 +263,38 @@ fn card_element(card: Card, cx: &App) -> AnyElement {
         .when_some(detail, |this, detail| {
             this.child(
                 div()
+                    .px(SMALL_INSET)
                     .text_size(theme.text(Text::Small))
                     .text_color(theme.muted_foreground)
                     .child(detail),
             )
         })
         .when_some(link, |this, link| this.child(div().flex().child(link)))
-        .when(!actions.is_empty(), |this| {
-            this.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .children(actions),
-            )
-        })
         .child(
-            div().flex().child(
-                Button::new(SharedString::from(format!("{id}-never")))
-                    .ghost()
-                    .small()
-                    .icon("icons/x.svg")
-                    .label(never)
-                    .on_click(silence),
-            ),
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new(SharedString::from(format!("{id}-never")))
+                        .ghost()
+                        .small()
+                        .icon("icons/x.svg")
+                        .label(never)
+                        .on_click(silence),
+                )
+                .children(actions),
         )
         .into_any_element()
 }
 
-/// A link-style button that opens `url`, with the external-link arrow after its label.
+/// A link-style button that opens `url`, with the external-link arrow before its label.
 fn link(id: SharedString, label: SharedString, url: String) -> Button {
     Button::new(id)
         .ghost()
         .small()
         .label(label)
-        .trailing("icons/external-link.svg")
+        .icon("icons/external-link.svg")
         .on_click(move |_, _, cx| cx.open_url(&url))
 }

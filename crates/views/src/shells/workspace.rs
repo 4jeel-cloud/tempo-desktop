@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{AnyView, App, Context, Entity, FocusHandle, Render, StyleRefinement};
-use gpui::{Window, div};
+use gpui::{Window, deferred, div};
 use input::WORKSPACE_CONTEXT;
 use state::{Playback, Queue, SideTab};
 use ui::{
@@ -334,11 +334,13 @@ impl Render for Workspace {
                     )
                     .child(self.toasts.clone()),
             )
+            // deferred so the cards sit above the sidebars' resize grips, and ahead of the
+            // dialogs so those still cover them
+            .child(deferred(self.notice.clone()))
             .child(self.card_menu.clone())
             .child(self.playlist_editor.clone())
             .child(self.tag_editor.clone())
             .child(self.confirm.clone())
             .child(self.widevine.clone())
-            .child(self.notice.clone())
     }
 }
