@@ -548,7 +548,7 @@ mod tests {
                 start: 16,
                 len: 16,
                 iv: [0; 16],
-                subs: Vec::new(),
+                subs: Default::default(),
             }],
             seals: vec![Seal::Encrypted],
             ..Cenc::default()
