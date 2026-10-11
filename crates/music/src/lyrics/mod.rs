@@ -82,7 +82,9 @@ pub fn instrumental(query: &LyricsQuery, hits: &[LyricsHit]) -> bool {
     matching().any(|hit| hit.instrumental) && !matching().any(|hit| !hit.lyrics.is_empty())
 }
 
-fn matched(query: &LyricsQuery, hit: &LyricsHit) -> bool {
+/// Whether a hit is for the queried track at all: the same title and artist, and a length close
+/// enough when both are known. Ranking and the instrumental check never look at any other hit.
+pub fn matched(query: &LyricsQuery, hit: &LyricsHit) -> bool {
     if !alike(&hit.title, &query.title) || !artists_alike(&hit.artist, &query.artist) {
         return false;
     }

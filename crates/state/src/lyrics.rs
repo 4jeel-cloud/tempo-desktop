@@ -699,13 +699,16 @@ async fn gather(
     for provider in providers {
         let query = query.clone();
         tasks.spawn(async move {
-            provider
+            let mut found = provider
                 .search(&query)
                 .await
                 .inspect_err(|error| {
                     log::warn!("lyrics: {} did not answer: {error:#}", provider.name())
                 })
-                .unwrap_or_default()
+                .unwrap_or_default();
+            // Hits for another track are dropped here, before the lookup holds and copies them.
+            found.retain(|hit| music::lyrics::matched(&query, hit));
+            found
         });
     }
     while !tasks.is_empty() {
