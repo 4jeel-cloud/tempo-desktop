@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::rc::Rc;
 use std::{collections::HashMap, ops::Range};
 
 use gpui::prelude::*;
@@ -5,8 +8,8 @@ use gpui::prelude::*;
 use gpui::{
     Animation, AnimationExt as _, App, Bounds, Context, Div, DragMoveEvent, Entity, FontWeight,
     MouseDownEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle, ScrollStrategy,
-    SharedString, Size, SpringConfig, SpringState, Task, UniformListScrollHandle, Window, div,
-    ease_in_out, px, relative, size, svg, uniform_list,
+    SharedString, Size, SpringConfig, SpringState, Task, UniformListScrollHandle, Window, canvas,
+    div, ease_in_out, px, relative, size, svg, uniform_list,
 };
 use i18n::t;
 use music::{Shape, Track, Voice};
@@ -237,6 +240,21 @@ struct Credit {
     lines: (SharedString, Option<SharedString>),
 }
 
+/// What the height of a settled lyrics row depends on besides its own words. A row off screen is
+/// drawn as a spacer of the height it was last laid out at, and only while none of this has
+/// changed since then.
+#[derive(Clone, Copy, PartialEq)]
+struct SheetLayout {
+    viewport: Size<Pixels>,
+    width: Pixels,
+    verse: Pixels,
+    lane: Pixels,
+    scripts: Option<RomanizationScripts>,
+    rem: Pixels,
+    scale: f32,
+    font: u64,
+}
+
 #[derive(Clone)]
 struct ContextMenuState {
     track: Track,
@@ -321,6 +339,14 @@ pub(crate) struct Aside {
     showed: bool,
     resolving: bool,
     credit: Option<Credit>,
+    /// Set once the sheet has been laid out, and taken by the next render, so rows are only stood
+    /// in for while the bounds the scroll handle holds are the last frame's.
+    laid: Rc<Cell<bool>>,
+    sheet_layout: Option<SheetLayout>,
+    /// Which rows this frame drew with nothing about them in motion, by row.
+    settled: Vec<bool>,
+    /// The same for the frame before, which the scroll handle's bounds describe.
+    was_settled: Vec<bool>,
 }
 
 impl Aside {
@@ -416,6 +442,10 @@ impl Aside {
             showed: false,
             resolving: false,
             credit: None,
+            laid: Rc::new(Cell::new(false)),
+            sheet_layout: None,
+            settled: Vec::new(),
+            was_settled: Vec::new(),
         }
     }
 
@@ -480,6 +510,12 @@ impl Aside {
             waking,
             settling,
         }
+    }
+
+    /// Whether the pointer has anything to do with a spot, over it, warming it, holding it or letting
+    /// it go. Such a row keeps its listeners, so it hears the pointer leave.
+    fn handled(&self, spot: Warm) -> bool {
+        [self.over, self.hovered, self.fading, self.held, self.rising].contains(&Some(spot))
     }
 
     fn press_verse(&mut self, spot: Warm, down: bool, cx: &mut Context<Self>) {
@@ -567,6 +603,9 @@ impl Aside {
         self.lyrics_wraps.clear();
         self.lane_rooms.clear();
         self.drifts.clear();
+        self.sheet_layout = None;
+        self.settled.clear();
+        self.was_settled.clear();
     }
 
     // the panel took the wheel
@@ -1107,6 +1146,21 @@ impl Aside {
             window.request_animation_frame();
         }
 
+        let layout = SheetLayout {
+            viewport: window.viewport_size(),
+            width: scroll.bounds().size.width,
+            verse,
+            lane: lane_size,
+            scripts: romanization_scripts,
+            rem: window.rem_size(),
+            scale: window.scale_factor(),
+            font: font_key(self.settings.read(cx).font()),
+        };
+        let measured = self.laid.replace(false) && self.sheet_layout == Some(layout);
+        self.sheet_layout = Some(layout);
+        std::mem::swap(&mut self.settled, &mut self.was_settled);
+        self.settled.clear();
+
         let mut drifting = false;
         let mut body: Vec<gpui::AnyElement> = match (&lines, &state) {
             (Some(lines), _) => {
@@ -1175,6 +1229,7 @@ impl Aside {
                     let haze = |depth: f32| clearing(verse_touch, depth);
                     if has_instrumental {
                         let notes_row = rendered.len();
+                        self.settled.push(false);
                         if singing && instrumental_line == Some(index) {
                             window.request_animation_frame();
                         }
@@ -1247,6 +1302,28 @@ impl Aside {
                         {
                             slot.insert(wrapped);
                         }
+                    }
+                    // A settled row far off screen is only a spacer of the height it had last frame,
+                    // which is the height it would have now.
+                    let settled =
+                        !active && !departing && !karaoke && !self.handled(Warm::Verse(index));
+                    let spared = (measured && settled && self.was_settled.get(row) == Some(&true))
+                        .then(|| viewport_place(&scroll, row, view, translation))
+                        .flatten()
+                        .filter(|place| {
+                            place.top + place.height < -view.size.height
+                                || place.top > view.size.height * 2.
+                        });
+                    self.settled.push(settled);
+                    if let Some(place) = spared {
+                        rendered.push(
+                            div()
+                                .flex_none()
+                                .w_full()
+                                .h(place.height)
+                                .into_any_element(),
+                        );
+                        continue;
                     }
                     let wrapped = self.lyrics_wraps.get(&index);
                     let line_has_ended = active_line.is_some_and(|active| index < active)
@@ -1557,6 +1634,14 @@ impl Aside {
         }
     }
 
+    /// An empty element that marks the sheet as laid out once the frame it renders in has been.
+    fn witness(&self) -> impl IntoElement {
+        let laid = self.laid.clone();
+        canvas(move |_, _, _| laid.set(true), |_, _, _, _| {})
+            .absolute()
+            .size_0()
+    }
+
     fn verse_slack(&self, count: usize, window: &Window, cx: &App) -> (Pixels, Pixels) {
         let scroll = self.verse_bar.read(cx).scroll().clone();
         let view = scroll.bounds().size.height;
@@ -1857,7 +1942,7 @@ impl Render for Aside {
                         }))
                     })
                     .when(self.tab == SideTab::Lyrics, |this| {
-                        this.child(self.verses(window, cx))
+                        this.child(self.verses(window, cx)).child(self.witness())
                     })
                     .when(self.tab == SideTab::Queue && empty, |this| {
                         this.child(vacant(t!("queue-empty"), cx).flex_1())
@@ -2184,6 +2269,13 @@ fn credit_lines(source: &str, writers: &[String]) -> (SharedString, Option<Share
         t!("lyrics-writers", writers = writers.as_str())
     });
     (from, by)
+}
+
+/// A fingerprint of a font name, so the sheet notices a change of font without keeping a copy.
+fn font_key(font: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    font.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn romanized_lyrics_lane(text: String, size: Pixels, theme: &ui::Theme) -> Div {
