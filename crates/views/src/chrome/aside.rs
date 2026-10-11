@@ -587,12 +587,14 @@ impl Aside {
         }
     }
 
-    // A physical spring per row. Feeding the inverse scroll delta makes each row lag behind the
-    // sheet; retaining velocity lets it settle naturally and survive a retarget without restarting.
-    fn dragged(&mut self, row: usize, along: f32, drag: Drag, window: &mut Window) -> Pixels {
+    /// Steps the physical spring that makes a row lag behind the sheet, fed the inverse scroll
+    /// delta and keeping its velocity so a retarget does not restart it. Returns how far the row
+    /// is drawn from its place while it still moves, and `None` once it rests, so the caller asks
+    /// for one more frame per render however many rows are moving.
+    fn dragged(&mut self, row: usize, along: f32, drag: Drag) -> Option<Pixels> {
         let held = self.drifts.get(&row).copied();
         if held.is_none() && drag.step == px(0.) {
-            return px(0.);
+            return None;
         }
         let mut state = held.unwrap_or_default();
         state.position = (px(state.position) - drag.step * (LAG_TRAIL * along))
@@ -602,11 +604,10 @@ impl Aside {
         state = spring.step(state, 0., drag.beat);
         if spring.is_settled(state, 0., LAG_LEAST.as_f32()) {
             self.drifts.remove(&row);
-            return px(0.);
+            return None;
         }
         self.drifts.insert(row, state);
-        window.request_animation_frame();
-        px(state.position)
+        Some(px(state.position))
     }
 
     fn set_hovered(&mut self, spot: Warm, over: bool, cx: &mut Context<Self>) {
@@ -1073,6 +1074,7 @@ impl Aside {
             window.request_animation_frame();
         }
 
+        let mut drifting = false;
         let mut body: Vec<gpui::AnyElement> = match (&lines, &state) {
             (Some(lines), _) => {
                 let active_line = sung_line(lines, position);
@@ -1144,8 +1146,9 @@ impl Aside {
                             window.request_animation_frame();
                         }
                         let notes_along = viewport_along(&scroll, notes_row, view, drag.downward);
-                        let notes_drift = self.dragged(notes_row, notes_along, drag, window);
-                        let notes_translation = presentation + notes_drift;
+                        let notes_drift = self.dragged(notes_row, notes_along, drag);
+                        drifting |= notes_drift.is_some();
+                        let notes_translation = presentation + notes_drift.unwrap_or_default();
                         let softness = match hazing && instrumental_line != Some(index) {
                             true => clearing(
                                 notes_touch,
@@ -1205,8 +1208,9 @@ impl Aside {
 
                     let row = rendered.len();
                     let along = viewport_along(&scroll, row, view, drag.downward);
-                    let drift = self.dragged(row, along, drag, window);
-                    let translation = presentation + drift;
+                    let drift = self.dragged(row, along, drag);
+                    drifting |= drift.is_some();
+                    let translation = presentation + drift.unwrap_or_default();
                     let active = Some(index) == active_line;
                     let departing = Some(index) == self.departing_line;
                     let karaoke = karaoke_effects
@@ -1466,9 +1470,10 @@ impl Aside {
         {
             let credit = body.len();
             let along = viewport_along(&scroll, credit, scroll.bounds(), drag.downward);
-            let drift = self.dragged(credit, along, drag, window);
+            let drift = self.dragged(credit, along, drag);
+            drifting |= drift.is_some();
             let translation = match lines.is_some() {
-                true => presentation + drift,
+                true => presentation + drift.unwrap_or_default(),
                 false => px(0.),
             };
             let note = div()
@@ -1489,6 +1494,9 @@ impl Aside {
                     this.child(t!("lyrics-writers", writers = writers.as_str()))
                 });
             body.push(adrift(note, translation, window).into_any_element());
+        }
+        if drifting {
+            window.request_animation_frame();
         }
 
         let (over, under) = match &lines {
