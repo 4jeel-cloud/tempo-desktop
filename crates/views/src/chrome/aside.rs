@@ -1203,7 +1203,7 @@ impl Aside {
                             soft if soft > HAZE_LEAST => this.blur(soft),
                             _ => this,
                         });
-                        rendered.push(adrift(notes, notes_translation, window).into_any_element());
+                        rendered.push(adrift(notes, notes_translation, false, window));
                     }
 
                     let row = rendered.len();
@@ -1423,7 +1423,7 @@ impl Aside {
                         }
                         _ => verse_line,
                     };
-                    rendered.push(adrift(verse_line, translation, window).into_any_element());
+                    rendered.push(adrift(verse_line, translation, traded, window));
                 }
 
                 rendered
@@ -1493,7 +1493,7 @@ impl Aside {
                     let writers = writers.join(", ");
                     this.child(t!("lyrics-writers", writers = writers.as_str()))
                 });
-            body.push(adrift(note, translation, window).into_any_element());
+            body.push(adrift(note, translation, false, window));
         }
         if drifting {
             window.request_animation_frame();
@@ -2646,14 +2646,31 @@ fn wrapped_rows(text: &str, size: Pixels, width: Pixels, window: &mut Window) ->
     lyrics_wrap_rows(&parts, size, width, window).map_or(1, |wrapped| wrapped.rows.len().max(1))
 }
 
-// culling needs layout
-fn adrift(row: impl Styled + IntoElement, shift: Pixels, window: &Window) -> Div {
+/// Draws a sheet row `shift` away from where layout put it. A moved row goes in a wrapper, so the
+/// sheet's scroll handle keeps measuring where the row rests, which the haze and the follow read.
+/// A row at rest goes in bare, since it lays out the same, unless `margined` says it carries an
+/// outer margin the wrapper's bounds have to keep.
+fn adrift(
+    row: impl Styled + IntoElement,
+    shift: Pixels,
+    margined: bool,
+    window: &Window,
+) -> gpui::AnyElement {
+    if shift == px(0.) && !margined {
+        return row.into_any_element();
+    }
     let grid = snapped(shift, window);
 
-    div().w_full().flex().flex_col().items_center().child(
-        row.top(grid)
-            .layer_translate(gpui::point(px(0.), shift - grid)),
-    )
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(
+            row.top(grid)
+                .layer_translate(gpui::point(px(0.), shift - grid)),
+        )
+        .into_any_element()
 }
 
 struct Place {
