@@ -715,6 +715,23 @@ impl Aside {
             .update(cx, |playback, cx| playback.enqueue_pin(pin, gap, cx));
     }
 
+    /// Applies a drop anywhere on the queue at the gap the marker shows, since the marker reaches
+    /// past a row into the header and spacing around it. A track moved within the queue stays put
+    /// when no gap is marked, and a track dragged in from elsewhere then goes to the end.
+    fn land(&mut self, dragged: &DraggedPin, cx: &mut Context<Self>) {
+        let gap = self.drop_gap.take();
+        match (dragged.spot(QUEUE), gap) {
+            (Some(held), Some(gap)) => self.queue.update(cx, |queue, cx| {
+                if queue.revision() == held.revision {
+                    queue.move_upcoming_to_gap(held.index, gap, cx);
+                }
+            }),
+            (Some(_), None) => {}
+            (None, gap) => self.enqueue(&dragged.pin, gap, cx),
+        }
+        cx.notify();
+    }
+
     fn dismiss_menu(&mut self, cx: &mut Context<Self>) {
         self.track_menu.reset(cx);
         self.context_menu = None;
@@ -828,22 +845,7 @@ impl Aside {
                     }
                 }),
             )
-            .on_drop(cx.listener(move |this, dragged: &DraggedPin, _, cx| {
-                let gap = this.drop_gap.take();
-                match dragged.spot(QUEUE) {
-                    Some(held) => {
-                        if let Some(gap) = gap {
-                            this.queue.update(cx, |queue, cx| {
-                                if queue.revision() == held.revision {
-                                    queue.move_upcoming_to_gap(held.index, gap, cx);
-                                }
-                            });
-                        }
-                    }
-                    None => this.enqueue(&dragged.pin, gap, cx),
-                }
-                cx.notify();
-            }))
+            .on_drop(cx.listener(|this, dragged: &DraggedPin, _, cx| this.land(dragged, cx)))
         })
         .when_some(similar_index, |this, target| {
             this.press(cx.listener(move |this, _, _, cx| {
@@ -1933,13 +1935,9 @@ impl Render for Aside {
                     .flex_1()
                     .min_h_0()
                     .when(self.tab == SideTab::Queue, |this| {
-                        this.on_drop(cx.listener(|this, dragged: &DraggedPin, _, cx| {
-                            let gap = this.drop_gap.take();
-                            if dragged.spot(QUEUE).is_none() {
-                                this.enqueue(&dragged.pin, gap, cx);
-                            }
-                            cx.notify();
-                        }))
+                        this.on_drop(
+                            cx.listener(|this, dragged: &DraggedPin, _, cx| this.land(dragged, cx)),
+                        )
                     })
                     .when(self.tab == SideTab::Lyrics, |this| {
                         this.child(self.verses(window, cx)).child(self.witness())
