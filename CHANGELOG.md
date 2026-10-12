@@ -13,6 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sizes macOS gives its own windows. You can also hide the close, minimize and zoom buttons.
 - Songs in your history show a heart when you hover them, so you can save one to your library
   straight from there.
+- Ctrl and + or - make the text bigger or smaller, and Ctrl+0 puts it back to the default
+  size. On macOS it is Cmd. The size is saved just like the one in Settings.
 
 ### Changed
 

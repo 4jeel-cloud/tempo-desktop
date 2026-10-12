@@ -1751,6 +1751,10 @@ impl AppSettings {
         self.schedule_save(cx);
     }
 
+    pub fn reset_font_size(&mut self, cx: &mut Context<Self>) {
+        self.set_font_size(DEFAULT_FONT_SIZE, cx);
+    }
+
     pub fn set_transparent(&mut self, transparent: bool, cx: &mut Context<Self>) {
         self.values.appearance.transparent = transparent;
         self.schedule_save(cx);
