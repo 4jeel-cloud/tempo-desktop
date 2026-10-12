@@ -1373,26 +1373,18 @@ impl SettingsView {
 
         let picker = Picker::new(CORNERS, &self.popovers, look.rounding.label())
             .width(Picker::NARROW)
-            // AppKit has no square window, so macOS offers only the corners it can draw.
-            .items(
-                Rounding::ALL
-                    .into_iter()
-                    .filter(|rounding| {
-                        cfg!(not(target_os = "macos")) || *rounding != Rounding::Square
-                    })
-                    .map(|rounding| {
-                        let overrides = overrides.clone();
-                        MenuItem::new(rounding.id(), rounding.label())
-                            .selected(look.rounding == rounding)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.settings.update(cx, |settings, cx| {
-                                    settings.set_rounding(rounding.id(), cx);
-                                });
-                                Theme::set(Look { rounding, ..look }, &overrides, cx);
-                                cx.notify();
-                            }))
-                    }),
-            );
+            .items(Rounding::ALL.into_iter().map(|rounding| {
+                let overrides = overrides.clone();
+                MenuItem::new(rounding.id(), rounding.label())
+                    .selected(look.rounding == rounding)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings.update(cx, |settings, cx| {
+                            settings.set_rounding(rounding.id(), cx);
+                        });
+                        Theme::set(Look { rounding, ..look }, &overrides, cx);
+                        cx.notify();
+                    }))
+            }));
 
         self.row(
             t!("settings-corners"),
