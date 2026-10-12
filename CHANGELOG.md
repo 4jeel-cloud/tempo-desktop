@@ -22,6 +22,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   they match other Windows apps.
 - Sonora uses less memory while your Apple Music library loads at startup, and it no longer
   frees memory in the background every few seconds to stay small.
+- On Linux, Sonora tells you when it cannot be heard because pipewire-alsa or pulseaudio-alsa
+  is missing, or when browser sign-in needs webkit2gtk-4.1, and names what to install.
+- Every notice in the corner, the update one included, has a Don't show again button. On the
+  update notice it turns off Check for updates.
+- `UpdateNotice` now is common `AppNotice`.
 
 ### Fixed
 
@@ -56,6 +61,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Sonora no longer freezes for a moment every second when your audio output cannot be opened.
+  It waits quietly and picks the output up as soon as it works.
 - The queue's "From" line and the pause button on album, playlist and artist cards and pins now
   follow the track that is playing, so an album you queue after another one shows as the source
   once it starts. When radio takes over, the queue names the song the radio comes from.

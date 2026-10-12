@@ -313,6 +313,9 @@ struct Values {
     local_folders: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     hidden_nav: Vec<String>,
+    /// Missing system requirements the user asked never to hear about again.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    silenced_requirements: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     scrobbling: BTreeMap<String, Account>,
     appearance: Appearance,
@@ -470,6 +473,7 @@ impl Default for Values {
             startup: DEFAULT_STARTUP.to_owned(),
             local_folders: Vec::new(),
             hidden_nav: Vec::new(),
+            silenced_requirements: Vec::new(),
             scrobbling: BTreeMap::new(),
             appearance: Appearance::default(),
         }
@@ -1573,6 +1577,21 @@ impl AppSettings {
             true => self.values.hidden_nav.retain(|hidden| hidden != entry),
             false => self.values.hidden_nav.push(entry.to_owned()),
         }
+        self.schedule_save(cx);
+    }
+
+    pub fn requirement_silenced(&self, slug: &str) -> bool {
+        self.values
+            .silenced_requirements
+            .iter()
+            .any(|silenced| silenced == slug)
+    }
+
+    pub fn silence_requirement(&mut self, slug: &str, cx: &mut Context<Self>) {
+        if self.requirement_silenced(slug) {
+            return;
+        }
+        self.values.silenced_requirements.push(slug.to_owned());
         self.schedule_save(cx);
     }
 
