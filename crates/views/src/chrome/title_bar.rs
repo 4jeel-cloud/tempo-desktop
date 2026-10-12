@@ -150,7 +150,6 @@ impl TitleBar {
                         false => "icons/panel-right-open.svg",
                     })
                     .tooltip("nav-sidebar-right")
-                    .selected(open)
                     .on_click(
                         cx.listener(|_, _, _, cx| cx.emit(TitleBarEvent::ToggleSidebarRight)),
                     ),
