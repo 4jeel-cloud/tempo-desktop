@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- On macOS, you can pick how rounded the window's corners are in Settings, using the corner
+  sizes macOS gives its own windows. You can also hide the close, minimize and zoom buttons.
+
 ### Changed
 
 - Fullscreen lyrics grow with a large window, up to twice their size, so they no longer look
