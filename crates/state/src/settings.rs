@@ -344,9 +344,15 @@ struct Appearance {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     server_side_decorations: bool,
     /// The window's own corner rounding, independent of `rounding` (the UI element radius).
-    /// On Windows this maps onto DWM's two fixed presets; on Linux/FreeBSD it only has an
-    /// effect with client-side decorations, since server-side ones are the compositor's call.
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    /// On Windows this maps onto DWM's two fixed presets and on macOS onto the toolbar styles
+    /// AppKit sizes its corners by. On Linux/FreeBSD it only has an effect with client-side
+    /// decorations, since server-side ones are the compositor's call.
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     window_rounding: String,
     window_controls: bool,
     #[cfg(not(target_os = "macos"))]
@@ -623,6 +629,8 @@ impl Default for Appearance {
             window_rounding: Rounding::Rounded.id().to_owned(),
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             window_rounding: Rounding::Square.id().to_owned(),
+            #[cfg(target_os = "macos")]
+            window_rounding: Rounding::Subtle.id().to_owned(),
             window_controls: true,
             #[cfg(not(target_os = "macos"))]
             traffic_light_controls: false,
@@ -1056,7 +1064,12 @@ impl AppSettings {
         }
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     pub fn window_rounding(&self) -> Rounding {
         Rounding::from_id(&self.values.appearance.window_rounding)
     }
@@ -1687,7 +1700,12 @@ impl AppSettings {
         self.schedule_save(cx);
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     pub fn set_window_rounding(&mut self, rounding: Rounding, cx: &mut Context<Self>) {
         self.values.appearance.window_rounding = rounding.id().to_owned();
         self.schedule_save(cx);

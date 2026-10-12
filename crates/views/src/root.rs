@@ -94,6 +94,9 @@ pub struct Root {
     font: Option<(String, Font)>,
     #[cfg(target_os = "windows")]
     rounded: Option<ui::Rounding>,
+    /// The corners and traffic-light position last handed to AppKit.
+    #[cfg(target_os = "macos")]
+    framed: Option<(ui::Rounding, gpui::Point<gpui::Pixels>)>,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     decorations: gpui::WindowDecorations,
 }
@@ -317,6 +320,8 @@ impl Root {
             font: None,
             #[cfg(target_os = "windows")]
             rounded: None,
+            #[cfg(target_os = "macos")]
+            framed: None,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             decorations: Sonora::global(cx).settings.read(cx).window_decorations(),
         };
@@ -806,6 +811,28 @@ impl Render for Root {
             if self.rounded != Some(rounding) {
                 self.rounded = Some(rounding);
                 state::apply_window_rounding(window, rounding, cx);
+            }
+        }
+
+        // AppKit lays the window out again while its toolbar changes and calls back into it, so
+        // the change waits until this frame has drawn. Fullscreen has no corners to pick, and
+        // AppKit puts the traffic lights back itself on the way out.
+        #[cfg(target_os = "macos")]
+        if !window.is_fullscreen() {
+            let settings = Sonora::global(cx).settings.read(cx);
+            let framed = (
+                settings.window_rounding(),
+                crate::chrome::traffic_lights(
+                    settings,
+                    ui::snapped(theme.metrics.title_bar, window),
+                ),
+            );
+            if self.framed != Some(framed) {
+                self.framed = Some(framed);
+                window.defer(cx, move |window, cx| {
+                    state::apply_window_rounding(window, framed.0, cx);
+                    window.set_traffic_light_position(framed.1);
+                });
             }
         }
 
