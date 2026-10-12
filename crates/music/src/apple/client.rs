@@ -235,7 +235,7 @@ impl std::error::Error for Busy {}
 /// A 404 from Apple. It also means an empty relationship, such as the tracks of a playlist
 /// with nothing in it, so a caller that knows the parent exists reads it as no rows.
 #[derive(Debug)]
-struct Missing;
+pub(crate) struct Missing;
 
 impl fmt::Display for Missing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

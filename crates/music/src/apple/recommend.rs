@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context as _, Result};
 
-use crate::apple::client::{ALBUM_ARTISTS, AppleClient};
+use crate::apple::client::{ALBUM_ARTISTS, AppleClient, Missing};
 use crate::apple::wire;
 use crate::escape;
 use crate::{Album, AlbumCatalogue, ArtistCatalogue, SUGGESTIONS, SavedArtist};
@@ -222,7 +222,7 @@ pub(crate) async fn album_catalogue(
 }
 
 /// Every release in one of an artist's views, read `VIEW_PAGE` at a time until Apple names no
-/// next page.
+/// next page. Apple answers 404 for a view the artist has nothing in, which reads as no releases.
 async fn whole_view(client: &AppleClient, artist_id: &str, name: &str) -> Result<Vec<Album>> {
     let path = client.catalog(&format!(
         "/artists/{}/view/{name}",
@@ -232,13 +232,18 @@ async fn whole_view(client: &AppleClient, artist_id: &str, name: &str) -> Result
     let mut albums = Vec::new();
     for page in 0..VIEW_PAGES {
         let offset = (page * VIEW_PAGE).to_string();
-        let body = client
+        let answered = client
             .get(
                 &path,
                 &[("limit", &limit), ("offset", &offset), ALBUM_ARTISTS],
             )
-            .await
-            .with_context(|| format!("cannot read the {name} of artist {artist_id}"))?;
+            .await;
+        let body = match answered {
+            Err(error) if error.is::<Missing>() => break,
+            answered => {
+                answered.with_context(|| format!("cannot read the {name} of artist {artist_id}"))?
+            }
+        };
         let outline = wire::outline(&body);
         albums.extend(outline.read(&wire::album));
         if !outline.next.is_present() {
