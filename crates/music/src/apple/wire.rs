@@ -31,7 +31,7 @@ use crate::{
 pub const ART: u32 = 600;
 pub const HERO: u32 = 1200;
 
-/// The artist views that together make up a discography, in the order the page lists them.
+/// The artist views the page shows first, before every edition arrives from the artist's albums.
 /// Apple keeps live albums and compilations out of `full-albums`, so each needs its own view.
 pub const DISCOGRAPHY: [&str; 4] = [
     "full-albums",
@@ -938,12 +938,21 @@ pub fn artist(value: &Resource) -> Option<Artist> {
             .or_else(|| text(&attributes.artist_bio)),
         monthly_listeners: None,
         top_tracks: view(value, "top-songs").iter().filter_map(song).collect(),
-        albums: DISCOGRAPHY
-            .iter()
-            .flat_map(|name| view(value, name))
-            .filter_map(album)
-            .collect(),
+        albums: newest_first(
+            DISCOGRAPHY
+                .iter()
+                .flat_map(|name| view(value, name))
+                .filter_map(album)
+                .collect(),
+        ),
     })
+}
+
+/// Orders releases by release date, newest first, keeping the order Apple gave for releases on
+/// the same day.
+pub fn newest_first(mut albums: Vec<Album>) -> Vec<Album> {
+    albums.sort_by(|a, b| b.release_date.cmp(&a.release_date));
+    albums
 }
 
 pub fn artist_profile(value: &Resource) -> Option<ArtistProfile> {
