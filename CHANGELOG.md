@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Songs in your history show a heart when you hover them, so you can save one to your library
+  straight from there.
+
 ### Changed
 
 - Fullscreen lyrics grow with a large window, up to twice their size, so they no longer look
