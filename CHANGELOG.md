@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-10-13
+
 ### Added
 
 - On macOS, you can pick how rounded the window's corners are in Settings, using the corner
@@ -28,7 +30,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is missing, or when browser sign-in needs webkit2gtk-4.1, and names what to install.
 - Every notice in the corner, the update one included, has a Don't show again button. On the
   update notice it turns off Check for updates.
-- `UpdateNotice` now is common `AppNotice`.
 
 ### Fixed
 
@@ -52,6 +53,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Signing in to Spotify on Windows on ARM no longer fails with "Spotify turned down the
   sign-in".
 - Spotify and Deezer accounts now show profile picture in Settings instead of initials.
+- Spotify playlists that someone else owns but lets you edit can now be edited in Sonora, so
+  you can add and remove their songs.
 - A song no longer gets stuck on plain lyrics because a lyrics source was down the first time
   it played. Sources that failed are asked again on the next play, and turning a source off
   no longer looks the song up again.
@@ -2056,7 +2059,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Initial release: a native Spotify client with playback, an interactive queue, the saved library,
 search, album, playlist, artist and song pages, context menus and adaptive theming.
 
-[unreleased]: https://github.com/sonorahq/sonora/compare/v0.42.2...HEAD
+[unreleased]: https://github.com/sonorahq/sonora/compare/v0.43.0...HEAD
+[0.43.0]: https://github.com/sonorahq/sonora/compare/v0.42.2...v0.43.0
 [0.42.2]: https://github.com/sonorahq/sonora/compare/v0.42.1...v0.42.2
 [0.42.1]: https://github.com/sonorahq/sonora/compare/v0.42.0...v0.42.1
 [0.42.0]: https://github.com/sonorahq/sonora/compare/v0.41.0...v0.42.0
