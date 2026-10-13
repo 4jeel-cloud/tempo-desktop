@@ -52,6 +52,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Signing in to Spotify on Windows on ARM no longer fails with "Spotify turned down the
   sign-in".
 - Spotify and Deezer accounts now show profile picture in Settings instead of initials.
+- A song no longer gets stuck on plain lyrics because a lyrics source was down the first time
+  it played. Sources that failed are asked again on the next play, and turning a source off
+  no longer looks the song up again.
 
 ## [0.42.2] - 2026-10-07
 
