@@ -15,12 +15,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   queueing several selected songs tells you how many went in.
 - Sonora tells you when the sleep timer ends, when a radio cannot start, and when a file you
   opened with it cannot be played.
+- You can undo taking songs, albums or artists out of your favorites or library, removing
+  songs from a playlist, removing a playlist from your library, and unpinning. Press Undo on the
+  toast that appears.
 
 ### Changed
 
 - Toasts have a new look. New ones pile up in front of older ones, and pointing at the pile
   spreads it out and keeps every toast on screen until you move away. Drag a toast to the right
   to dismiss it.
+
+### Fixed
+
+- Removing several playlists from your library at once no longer stops after the first one.
 
 ## [0.43.0] - 2026-10-13
 
