@@ -151,10 +151,11 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-      # The self-signed test certificate exercises the whole SignPath path without anyone having
-      # to approve a request. Like the upload below, a failure here must not turn the build red.
+      # A manual run checks the SignPath setup with the self-signed test certificate. Pushes skip
+      # it, since a test signature is worth nothing to anyone downloading the build. Like the
+      # upload below, a failure here must not turn the build red.
       - name: sign the executable
-        if: runner.os == 'Windows' && env.SIGNPATH_API_TOKEN != ''
+        if: runner.os == 'Windows' && github.event_name == 'workflow_dispatch' && env.SIGNPATH_API_TOKEN != ''
         continue-on-error: true
         uses: ./.github/actions/sign
         with:
@@ -194,7 +195,7 @@ jobs:
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "scripts/windows/sonora.iss"
 
       - name: sign the installer
-        if: runner.os == 'Windows' && env.SIGNPATH_API_TOKEN != ''
+        if: runner.os == 'Windows' && github.event_name == 'workflow_dispatch' && env.SIGNPATH_API_TOKEN != ''
         continue-on-error: true
         uses: ./.github/actions/sign
         with:
