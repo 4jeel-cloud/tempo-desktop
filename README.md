@@ -242,12 +242,9 @@ Free code signing provided by [SignPath.io](https://signpath.io), certificate by
 [SignPath Foundation](https://signpath.org).
 
 The Windows executable and installer are built by GitHub Actions from this repository and signed
-through SignPath. Releases carry the signature once the SignPath Foundation certificate is issued.
+through SignPath.
 
-- Committers and reviewers: [members of sonorahq](https://github.com/orgs/sonorahq/people)
-- Approvers: [@nolight132](https://github.com/nolight132)
-
-What Sonora sends over the network, and when, is described in the [privacy policy](PRIVACY.md).
+Approvers: [@nolight132](https://github.com/nolight132)
 
 ## License
 
