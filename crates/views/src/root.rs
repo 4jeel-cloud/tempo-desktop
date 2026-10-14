@@ -18,6 +18,7 @@ use ui::{ActiveTheme as _, Dismiss, Entrance, Look, Stillness, Theme, ThemeKind,
 use crate::chrome::{TitleBar, TitleBarEvent, TitleBarOptions, Toolbar, Tooled};
 use crate::screens::search::SearchView;
 use crate::screens::settings::SettingsHeader;
+use crate::screens::toasts::ToastsView;
 use crate::shared::ambient::{self, Ambient};
 use crate::shared::tracks::{LIBRARY_COLUMNS, album_columns};
 use crate::shells::Shell;
@@ -686,6 +687,7 @@ impl Root {
                 header = Some(self.screens.settings_header.clone().into());
                 self.screens.settings.clone().into()
             }
+            Destination::Toasts => cx.new(ToastsView::new).into(),
         };
 
         self.toolbar = toolbar;
