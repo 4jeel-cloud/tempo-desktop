@@ -841,6 +841,37 @@ toast-library-add-failed = { $name } could not be added to your library
 toast-library-remove-failed = { $name } could not be removed from your library
 toast-library-added = Added to your library
 toast-library-removed = Removed from your library
+toast-library-removed-one = Removed { $name } from your library
+toast-library-songs-removed = Removed { $count ->
+        [one] one song
+       *[other] { $count } songs
+    } from your library
+toast-library-albums-removed = Removed { $count ->
+        [one] one album
+       *[other] { $count } albums
+    } from your library
+toast-playlists-removed = Removed { $count ->
+        [one] one playlist
+       *[other] { $count } playlists
+    } from your library
+toast-favorite-removed = Removed { $name } from your favorites
+toast-favorite-songs-removed = Removed { $count ->
+        [one] one song
+       *[other] { $count } songs
+    } from your favorites
+toast-favorite-albums-removed = Removed { $count ->
+        [one] one album
+       *[other] { $count } albums
+    } from your favorites
+toast-favorite-artists-removed = Removed { $count ->
+        [one] one artist
+       *[other] { $count } artists
+    } from your favorites
+toast-tracks-removed = Removed { $count ->
+        [one] one song
+       *[other] { $count } songs
+    } from { $name }
+toast-unpinned = Unpinned { $name }
 
 # lyrics
 lyrics-title = Lyrics
