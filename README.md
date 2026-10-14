@@ -236,9 +236,16 @@ Sonora is built with the help of some incredible open-source projects, including
 - [librespot](https://github.com/librespot-org/librespot) — Spotify playback and library integration.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — certain YouTube ideas implemented in [ytmusic-rs](https://github.com/sonorahq/ytmusic-rs) :)
 
-## Code signing
+## Code signing policy
 
-Sonora has applied for code signing through SignPath Foundation. Current releases are not yet signed through SignPath Foundation. If approved, signed releases will use free code signing provided by SignPath.io, with a certificate by SignPath Foundation.
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by
+[SignPath Foundation](https://signpath.org).
+
+The Windows executable and installer are built by GitHub Actions from this repository and signed
+through SignPath.
+
+- Reviewers: members of sonorahq
+- Approvers: [@nolight132](https://github.com/nolight132)
 
 ## License
 
