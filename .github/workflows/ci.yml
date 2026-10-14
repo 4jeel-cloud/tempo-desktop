@@ -97,6 +97,8 @@ jobs:
     name: ${{ matrix.target }}
     if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
+    env:
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -149,6 +151,18 @@ jobs:
         if: always()
         run: sccache --show-stats
 
+      # The self-signed test certificate exercises the whole SignPath path without anyone having
+      # to approve a request. Like the upload below, a failure here must not turn the build red.
+      - name: sign the executable
+        if: runner.os == 'Windows' && env.SIGNPATH_API_TOKEN != ''
+        continue-on-error: true
+        uses: ./.github/actions/sign
+        with:
+          file: target/${{ matrix.target }}/release/sonora.exe
+          artifact: unsigned-exe-${{ matrix.target }}
+          policy: test-signing
+          api-token: ${{ env.SIGNPATH_API_TOKEN }}
+
       - name: stage the executable
         shell: bash
         env:
@@ -178,6 +192,16 @@ jobs:
           $env:SONORA_EXE = (Resolve-Path "target/$env:TARGET/release/sonora.exe").Path
           $env:SONORA_DIST = (Resolve-Path "dist").Path
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "scripts/windows/sonora.iss"
+
+      - name: sign the installer
+        if: runner.os == 'Windows' && env.SIGNPATH_API_TOKEN != ''
+        continue-on-error: true
+        uses: ./.github/actions/sign
+        with:
+          file: dist/${{ matrix.setup }}.exe
+          artifact: unsigned-setup-${{ matrix.target }}
+          policy: test-signing
+          api-token: ${{ env.SIGNPATH_API_TOKEN }}
 
       # A convenience binary, not a release artefact: GitHub's artifact service times out often
       # enough that it must not be what turns a green build red.
