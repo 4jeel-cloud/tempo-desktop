@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Toasts have a new look. New ones pile up in front of older ones, and pointing at the pile
+  spreads it out and keeps every toast on screen until you move away. Drag a toast to the right
+  to dismiss it.
+
 ## [0.43.0] - 2026-10-13
 
 ### Added

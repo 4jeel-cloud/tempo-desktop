@@ -212,6 +212,8 @@ pub enum Destination {
     Genre(SharedString),
     Search,
     Settings(SettingsTab),
+    /// A page that shows every kind of toast on demand, for trying them out.
+    Toasts,
     Fullscreen,
 }
 

@@ -195,6 +195,7 @@ enum Slot {
     Version,
     Updates,
     Log,
+    Toasts,
     License,
     Source,
 }
@@ -658,10 +659,15 @@ impl SettingsView {
                 Slot::Version,
                 Slot::Updates,
                 Slot::Log,
+            ]
+            .into_iter()
+            .chain(cfg!(debug_assertions).then_some(Slot::Toasts))
+            .chain([
                 Slot::Title("settings-group-project"),
                 Slot::License,
                 Slot::Source,
-            ],
+            ])
+            .collect(),
         }
     }
 
@@ -856,6 +862,7 @@ impl SettingsView {
                 t!("settings-check-updates-detail"),
             ),
             Slot::Log => (t!("settings-log"), t!("settings-log-detail")),
+            Slot::Toasts => (t!("settings-toasts"), t!("settings-toasts-detail")),
             Slot::License => (t!("settings-license"), t!("settings-license-detail")),
             Slot::Source => (t!("settings-source"), t!("settings-source-detail")),
         };
@@ -1019,6 +1026,7 @@ impl SettingsView {
             Slot::Version => self.version_row(cx).element,
             Slot::Updates => self.updates_row(cx).element,
             Slot::Log => self.log_row(cx).element,
+            Slot::Toasts => self.toasts_row(cx).element,
             Slot::License => self.license_row(cx).element,
             Slot::Source => self.source_row(cx).element,
         }
@@ -2645,6 +2653,24 @@ impl SettingsView {
                         log::warn!("settings: cannot open {}: {error}", path.display());
                     }
                 })
+                .into_any_element(),
+        )
+    }
+
+    /// Opens the page that shows every kind of toast. Only debug builds list it.
+    fn toasts_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+
+        self.row(
+            t!("settings-toasts"),
+            t!("settings-toasts-detail"),
+            theme.muted_foreground,
+            theme.text(Text::Small),
+            Button::new("open-toasts")
+                .label(t!("settings-toasts-open"))
+                .small()
+                .outline()
+                .on_click(|_, _, cx| navigate(Destination::Toasts, cx))
                 .into_any_element(),
         )
     }
