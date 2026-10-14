@@ -955,9 +955,32 @@ toast-offline = No connection. Nothing will stream until it is back.
 toast-settings-broken = Fix line { $name } of settings.json to save changes
 toast-tray-unavailable = There is no system tray to put the icon in
 toast-undo = Undo
+toast-link-copied = Link copied
+menu-copy-link-none = This has no link to share
+menu-copy-link-local = Local artists and playlists have no link
+toast-settings-save-failed = Settings could not be saved
+toast-settings-overwritten = settings.json changed on disk, so your last change was not saved
+toast-widevine-download-failed = Widevine could not be downloaded
+toast-widevine-install-failed = Widevine could not be installed
+toast-widevine-remove-failed = Widevine could not be removed
+toast-library-scanned = { $count ->
+    [one] Library scanned, one song found
+   *[other] Library scanned, { $count } songs found
+}
+toast-scan-failed = Your music folders could not be scanned
+toast-folder-removed = Removed { $name }
+toast-folder-missing = { $name } is no longer on disk
+toast-history-removed = { $count ->
+    [one] Removed from history
+   *[other] Removed { $count } songs from history
+}
+toast-history-remove-failed = A song could not be removed from history
+toast-history-restore-failed = History could not be restored
+toast-history-clear-failed = History could not be cleared
 
 # power
 wake-reason = Music is playing
+
 toasts-page-title = Toasts
 toasts-page-detail = Every kind of toast Sonora can show. Point at the pile to spread it out and stop the clocks, or drag a toast to the right to dismiss it.
 toasts-group-kinds = Kinds

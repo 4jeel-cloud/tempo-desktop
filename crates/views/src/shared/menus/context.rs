@@ -3,7 +3,7 @@ use gpui::{App, ClickEvent, ClipboardItem, Context, Entity, SharedString, Window
 use i18n::t;
 use music::{Album, GenreItem, MediaKind, Playlist, SavedArtist, Track};
 use router::{Destination, navigate};
-use state::{Addition, Detail, History, Library, Origin, Playback, Shelf, Sonora};
+use state::{Addition, Detail, History, Library, Origin, Outcome, Playback, Shelf, Sonora, Toasts};
 use ui::{Menu, MenuItem, MenuSearch, Pin, PinKind, Scrollbar, SubmenuState};
 
 use crate::shared::confirm::Confirm;
@@ -324,19 +324,8 @@ impl ItemMenu {
             false => Shelf::Streaming,
         };
         let playlist_menu = self.playlists(Addition::Tracks(ids.clone()), shelf, many, cx);
-        let copy = match (many, track.id.clone()) {
-            (true, _) => None,
-            (false, Some(id)) => Some(
-                MenuItem::new("copy-track-link", t!("menu-copy-link"))
-                    .icon("icons/link.svg")
-                    .on_click(move |_, _, cx| copy_link(MediaKind::Track, &id, cx)),
-            ),
-            (false, None) => Some(
-                MenuItem::new("copy-track-link", t!("menu-copy-link"))
-                    .icon("icons/link.svg")
-                    .disabled(),
-            ),
-        };
+        let copy = (!many)
+            .then(|| copy_link_item("copy-track-link", MediaKind::Track, track.id.as_deref(), cx));
         let queued: Vec<Track> = tracks
             .iter()
             .filter(|track| track.playable)
@@ -767,11 +756,12 @@ pub(crate) fn album_menu(
                         });
                     }),
             ],
-            vec![
-                MenuItem::new("copy-album-link", t!("menu-copy-link"))
-                    .icon("icons/link.svg")
-                    .on_click(move |_, _, cx| copy_link(MediaKind::Album, &copied, cx)),
-            ],
+            vec![copy_link_item(
+                "copy-album-link",
+                MediaKind::Album,
+                Some(&copied),
+                cx,
+            )],
             album
                 .pin()
                 .map(|pin| pin_action(&pin, cx))
@@ -870,11 +860,12 @@ pub(crate) fn artist_menu(
             artist_library_item(artist.clone(), cx)
                 .into_iter()
                 .collect(),
-            vec![
-                MenuItem::new("copy-artist-link", t!("menu-copy-link"))
-                    .icon("icons/link.svg")
-                    .on_click(move |_, _, cx| copy_link(MediaKind::Artist, &copied, cx)),
-            ],
+            vec![copy_link_item(
+                "copy-artist-link",
+                MediaKind::Artist,
+                Some(&copied),
+                cx,
+            )],
             artist
                 .pin()
                 .map(|pin| pin_action(&pin, cx))
@@ -1002,11 +993,12 @@ pub(crate) fn playlist_menu(playlist: Playlist, playback: Entity<Playback>, cx: 
             actions,
             match imported {
                 true => Vec::new(),
-                false => vec![
-                    MenuItem::new("copy-playlist-link", t!("menu-copy-link"))
-                        .icon("icons/link.svg")
-                        .on_click(move |_, _, cx| copy_link(MediaKind::Playlist, &copied, cx)),
-                ],
+                false => vec![copy_link_item(
+                    "copy-playlist-link",
+                    MediaKind::Playlist,
+                    Some(&copied),
+                    cx,
+                )],
             },
             pinnable
                 .map(|pin| pin_action(&pin, cx))
@@ -1074,11 +1066,7 @@ fn sparse_menu(pin: &Pin, playback: Entity<Playback>, cx: &App) -> Menu {
         vec![
             open.into_iter().collect(),
             transport_items(pin, playback),
-            vec![
-                MenuItem::new("copy-pin-link", t!("menu-copy-link"))
-                    .icon("icons/link.svg")
-                    .on_click(move |_, _, cx| copy_link(kind, &copied, cx)),
-            ],
+            vec![copy_link_item("copy-pin-link", kind, Some(&copied), cx)],
             vec![pin_action(pin, cx)],
         ],
     )
@@ -1230,19 +1218,36 @@ fn saved_track(id: &str, cx: &App) -> Option<Track> {
         .cloned()
 }
 
-fn copy_link(kind: MediaKind, id: &str, cx: &mut App) {
+/// The Copy link item. The link is made while the menu is built, so an item with no link shows
+/// up disabled and says why on hover.
+fn copy_link_item(id: &'static str, kind: MediaKind, target: Option<&str>, cx: &App) -> MenuItem {
+    let item = MenuItem::new(id, t!("menu-copy-link")).icon("icons/link.svg");
+    match share_link(kind, target, cx) {
+        Ok(url) => item.on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+            Toasts::show(Outcome::Done, "toast-link-copied", cx);
+        }),
+        Err(reason) => item.disabled().tooltip(reason),
+    }
+}
+
+/// The link that shares `id`, or the Fluent key of the reason there is none.
+fn share_link(kind: MediaKind, id: Option<&str>, cx: &App) -> Result<String, &'static str> {
+    let Some(id) = id else {
+        return Err("menu-copy-link-none");
+    };
+    let local = music::is_local_id(id);
     let session = Sonora::global(cx).session.read(cx);
-    let client = match music::is_local_id(id) {
+    let client = match local {
         true => session.local_client(),
         false => session.client(),
     };
-    let Some(client) = client else {
-        return;
-    };
-    let Some(url) = client.share_url(kind, id) else {
-        return;
-    };
-    cx.write_to_clipboard(ClipboardItem::new_string(url));
+    client
+        .and_then(|client| client.share_url(kind, id))
+        .ok_or(match local {
+            true => "menu-copy-link-local",
+            false => "menu-copy-link-none",
+        })
 }
 
 fn playlist_library_item(playlist: Playlist, cx: &App) -> MenuItem {

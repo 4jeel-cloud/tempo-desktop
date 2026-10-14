@@ -18,6 +18,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - You can undo taking songs, albums or artists out of your favorites or library, removing
   songs from a playlist, removing a playlist from your library, and unpinning. Press Undo on the
   toast that appears.
+- You can undo removing a play from your history or a music folder.
+- Copy link tells you it worked. Where there is no link to copy, the entry is greyed out and
+  says why.
+- Sonora tells you when a library scan you started has finished.
 
 ### Changed
 
@@ -28,6 +32,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Removing several playlists from your library at once no longer stops after the first one.
+- Sonora now tells you when your settings could not be saved, or when downloading, installing
+  or removing Widevine fails. Both used to fail without a word.
 
 ## [0.43.0] - 2026-10-13
 
