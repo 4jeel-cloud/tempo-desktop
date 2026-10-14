@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- You can undo clearing the queue or removing songs from it. Press Undo on the toast that
+  appears.
+- Adding a whole album, playlist or artist to the queue shows that it is on its way, and
+  queueing several selected songs tells you how many went in.
+- Sonora tells you when the sleep timer ends, when a radio cannot start, and when a file you
+  opened with it cannot be played.
+
 ### Changed
 
 - Toasts have a new look. New ones pile up in front of older ones, and pointing at the pile
