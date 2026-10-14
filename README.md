@@ -244,7 +244,8 @@ Free code signing provided by [SignPath.io](https://signpath.io), certificate by
 The Windows executable and installer are built by GitHub Actions from this repository and signed
 through SignPath.
 
-Approvers: [@nolight132](https://github.com/nolight132)
+- Reviewers: members of sonorahq
+- Approvers: [@nolight132](https://github.com/nolight132)
 
 ## License
 
