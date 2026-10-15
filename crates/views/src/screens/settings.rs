@@ -325,10 +325,7 @@ struct DraggedLyricsProvider {
 }
 
 impl Render for DraggedLyricsProvider {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if cx.active_drag_cursor_style() != Some(PROVIDER_DRAG_CURSOR) {
-            cx.set_active_drag_cursor_style(PROVIDER_DRAG_CURSOR, window);
-        }
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
         div()
             .w(self.width)
@@ -343,13 +340,11 @@ impl Render for DraggedLyricsProvider {
             .text_color(theme.foreground)
             .text_size(theme.text(Text::Body))
             .line_height(relative(LEADING))
-            .when(cfg!(target_os = "linux"), |preview| {
-                // Linux does not apply GPUI's active drag cursor to the window.
-                preview.child(canvas(
-                    |_, _, _| (),
-                    |_, _, window, _| window.set_window_cursor_style(PROVIDER_DRAG_CURSOR),
-                ))
-            })
+            .child(canvas(
+                // GPUI temporarily removes the active drag while rendering this preview.
+                |_, _, _| (),
+                |_, _, window, _| window.set_window_cursor_style(PROVIDER_DRAG_CURSOR),
+            ))
             .child(
                 div()
                     .truncate()
