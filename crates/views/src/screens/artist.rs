@@ -376,10 +376,12 @@ impl ArtistView {
                 true => heart.tint(theme.primary),
                 false => heart,
             }
-            .on_click(move |_, _, cx| match saved {
-                true => Confirm::artists(vec![target.clone()], cx),
-                false => {
-                    library.update(cx, |library, cx| library.toggle_artist(target.clone(), cx));
+            .on_click(move |_, _, cx| {
+                match saved && !Confirm::unstarring(&target.id, cx) {
+                    true => Confirm::artists(vec![target.clone()], cx),
+                    false => {
+                        library.update(cx, |library, cx| library.heart_artist(target.clone(), cx));
+                    }
                 }
             }),
         )

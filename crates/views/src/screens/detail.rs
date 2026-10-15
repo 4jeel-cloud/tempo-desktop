@@ -499,9 +499,11 @@ impl DetailView {
                 false => heart,
             }
             .on_click(move |_, _, cx| match &target {
-                Saveable::Album(album) if saved => Confirm::albums(vec![album.clone()], cx),
+                Saveable::Album(album) if saved && !Confirm::unstarring(&album.id, cx) => {
+                    Confirm::albums(vec![album.clone()], cx)
+                }
                 Saveable::Album(album) => {
-                    library.update(cx, |library, cx| library.toggle_album(album.clone(), cx));
+                    library.update(cx, |library, cx| library.heart_album(album.clone(), cx));
                 }
                 Saveable::Playlist(playlist) if saved => {
                     Confirm::playlists(vec![playlist.id.clone()], cx)

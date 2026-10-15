@@ -15,3 +15,5 @@ router.workspace = true
 ui.workspace = true
 state.workspace = true
 log.workspace = true
+[dev-dependencies]
+gpui_platform.workspace = true

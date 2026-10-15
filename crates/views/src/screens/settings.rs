@@ -733,10 +733,14 @@ impl SettingsView {
                 Slot::Version,
                 Slot::Updates,
                 Slot::Log,
+            ]
+            .into_iter()
+            .chain([
                 Slot::Title("settings-group-project"),
                 Slot::License,
                 Slot::Source,
-            ],
+            ])
+            .collect(),
         }
     }
 

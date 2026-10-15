@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -88,7 +88,9 @@ impl QueuePlacement {
 use crate::queue::Queue;
 use serde::{Deserialize, Serialize};
 
-use crate::{AppSettings, Io, Network, Outcome, Session, SessionEvent, Target, Toasts, join};
+use crate::{
+    AppSettings, Io, Network, Outcome, Session, SessionEvent, Target, Toast, Toasts, join,
+};
 
 const POSITION_INTERVAL: Duration = Duration::from_millis(500);
 const CLOCK_SETTLE: Duration = Duration::from_secs(1);
@@ -130,6 +132,9 @@ const RADIO_LOOKAHEAD: usize = 10;
 /// is dropped. An empty stretch lands with the queue still short, which asks for the next one
 /// straight away, so a provider serving the same tracks over would otherwise never be let go of.
 const STATION_DRY_LIMIT: u8 = 3;
+
+/// How many unreadable files a toast names before it cuts the list short.
+const LISTED_FILES: usize = 5;
 
 /// A track the engine was asked to fetch ahead, and whether it was also lined up to follow the
 /// current one gaplessly.
@@ -350,6 +355,26 @@ struct Station {
     next: String,
 }
 
+/// A file handed in from the OS that could not be read as a track.
+struct Unread {
+    name: String,
+    /// What the system said when the file was looked up, or `None` when the file is there but
+    /// is not audio Sonora can read.
+    error: Option<String>,
+}
+
+impl Unread {
+    /// Names the file at `path` and keeps the error if it could not be reached at all.
+    fn of(path: &Path) -> Self {
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let error = std::fs::metadata(path).err().map(|error| error.to_string());
+        Self { name, error }
+    }
+}
+
 /// Everything the UI knows about what is playing, and the only thing that drives an engine.
 /// Holds one engine for the streaming provider and one for local files, a `Queue` for what
 /// comes next, and a clock for the position between the engine's reports. Views act through
@@ -464,7 +489,7 @@ impl Playback {
         .detach();
         cx.observe(&queue, |this, _, cx| {
             this.continue_station(cx);
-            this.suggest_similar(cx);
+            this.suggest_similar(false, cx);
         })
         .detach();
 
@@ -746,6 +771,7 @@ impl Playback {
         self.begin(vec![seed.clone()], 0, Some(origin.clone()), cx);
 
         let seed_id = seed.id.clone();
+        let title = seed.name.clone();
         let io = Io::global(cx);
         self.fetch = Some(cx.spawn(async move |this, cx| {
             let loaded = join(io.spawn(async move {
@@ -768,6 +794,9 @@ impl Playback {
                 Err(error) => {
                     log::error!("playback: cannot load radio queue: {error:#}");
                     crate::noted(&error, cx);
+                    if this.origin(cx) == Some(&origin) {
+                        Toasts::about(Outcome::Failed, "toast-radio-failed", title, cx);
+                    }
                 }
             })
             .ok();
@@ -789,91 +818,106 @@ impl Playback {
 
     /// Appends a track, or starts playing it when nothing is queued.
     pub fn enqueue(&mut self, track: Track, cx: &mut Context<Self>) {
-        if self.queue.read(cx).current().is_none() {
-            self.begin(vec![track], 0, None, cx);
-            return;
-        }
-        let name = track.name.clone();
-        let target = song_target(&track);
-        self.queue.update(cx, |queue, cx| queue.append(track, cx));
-        Toasts::linked(Outcome::Done, "toast-queued-track", name, target, cx);
+        self.announce(vec![track], None, QueuePlacement::End, cx);
     }
 
     pub fn play_next(&mut self, track: Track, cx: &mut Context<Self>) {
-        if self.queue.read(cx).current().is_none() {
-            self.begin(vec![track], 0, None, cx);
-            return;
-        }
-        let name = track.name.clone();
-        let target = song_target(&track);
-        self.queue.update(cx, |queue, cx| queue.prepend(track, cx));
-        Toasts::linked(Outcome::Done, "toast-next-track", name, target, cx);
+        self.announce(vec![track], None, QueuePlacement::Next, cx);
     }
 
-    /// Queues `tracks` from `origin` after the ones queued by hand, or starts playing them when
-    /// nothing is queued. `origin` is `None` for tracks the user picked one by one.
+    /// Queues tracks the user picked together after the ones queued by hand, or starts playing
+    /// them when nothing is queued. `origin` is `None` for tracks picked one by one.
     pub fn enqueue_all(
         &mut self,
         tracks: Vec<Track>,
         origin: Option<Origin>,
         cx: &mut Context<Self>,
     ) {
-        if tracks.is_empty() {
-            return;
-        }
-        if self.queue.read(cx).current().is_none() {
-            self.begin(tracks, 0, origin, cx);
-            return;
-        }
-        self.queue
-            .update(cx, |queue, cx| queue.append_all(tracks, origin, cx));
+        self.announce(tracks, origin, QueuePlacement::End, cx);
     }
 
+    /// Queues tracks the user picked together right after the current one, or starts playing
+    /// them when nothing is queued.
     pub fn play_next_all(
         &mut self,
         tracks: Vec<Track>,
         origin: Option<Origin>,
         cx: &mut Context<Self>,
     ) {
-        if tracks.is_empty() {
-            return;
-        }
-        if self.queue.read(cx).current().is_none() {
-            self.begin(tracks, 0, origin, cx);
-            return;
-        }
-        self.queue
-            .update(cx, |queue, cx| queue.prepend_all(tracks, origin, cx));
+        self.announce(tracks, origin, QueuePlacement::Next, cx);
     }
 
     /// Queues a track after everything already lined up, or starts playing it when nothing is.
     pub fn play_last(&mut self, track: Track, cx: &mut Context<Self>) {
-        if self.queue.read(cx).current().is_none() {
-            self.begin(vec![track], 0, None, cx);
-            return;
-        }
-        let name = track.name.clone();
-        let target = song_target(&track);
-        self.queue
-            .update(cx, |queue, cx| queue.append_last(track, cx));
-        Toasts::linked(Outcome::Done, "toast-last-track", name, target, cx);
+        self.announce(vec![track], None, QueuePlacement::Last, cx);
     }
 
+    /// Queues tracks the user picked together after everything already lined up, or starts
+    /// playing them when nothing is.
     pub fn play_last_all(
         &mut self,
         tracks: Vec<Track>,
         origin: Option<Origin>,
         cx: &mut Context<Self>,
     ) {
+        self.announce(tracks, origin, QueuePlacement::Last, cx);
+    }
+
+    /// Places tracks the user picked and says where they went, naming one track and counting
+    /// several. Nothing is said when they start playback instead, since playing is the answer.
+    fn announce(
+        &mut self,
+        tracks: Vec<Track>,
+        origin: Option<Origin>,
+        placement: QueuePlacement,
+        cx: &mut Context<Self>,
+    ) {
+        let count = tracks.len();
+        let named = match tracks.as_slice() {
+            [only] => Some((only.name.clone(), song_target(only))),
+            _ => None,
+        };
+        if count == 0 || !self.place(tracks, origin, placement, cx) {
+            return;
+        }
+        match named {
+            Some((name, target)) => {
+                if let Some(key) = placement.toast("track") {
+                    Toasts::linked(Outcome::Done, key, name, target, cx);
+                }
+            }
+            None => {
+                if let Some(key) = placement.toast("tracks") {
+                    Toasts::post(Toast::new(Outcome::Done, key).count(count), cx);
+                }
+            }
+        }
+    }
+
+    /// Puts tracks into the queue at `placement` without a word, or starts playing them when
+    /// nothing is queued. Returns whether something was already playing when they arrived.
+    fn place(
+        &mut self,
+        tracks: Vec<Track>,
+        origin: Option<Origin>,
+        placement: QueuePlacement,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let playing = self.queue.read(cx).current().is_some();
         if tracks.is_empty() {
-            return;
+            return playing;
         }
-        if self.queue.read(cx).current().is_none() {
+        if !playing {
             self.begin(tracks, 0, origin, cx);
-            return;
+            return false;
         }
-        self.queue
-            .update(cx, |queue, cx| queue.append_last_all(tracks, origin, cx));
+        self.queue.update(cx, |queue, cx| match placement {
+            QueuePlacement::Next => queue.prepend_all(tracks, origin, cx),
+            QueuePlacement::End => queue.append_all(tracks, origin, cx),
+            QueuePlacement::Last => queue.append_last_all(tracks, origin, cx),
+            QueuePlacement::Gap(gap) => queue.insert_upcoming(gap, tracks, origin, cx),
+        });
+        true
     }
 
     /// Opens paths handed in from the OS (a file-association launch or hand-off). A single file
@@ -887,37 +931,50 @@ impl Playback {
         self.resolve_paths(paths, cx);
     }
 
+    /// Reads the files on the tokio runtime and plays what it could read. Files it could not read
+    /// are reported on a toast, as a failure when none could be read and as a warning otherwise.
     fn resolve_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let provider = self.session.read(cx).local_provider();
         let io = Io::global(cx);
         self.open = Some(cx.spawn(async move |this, cx| {
             let loaded = join(io.spawn(async move {
                 let mut tracks = Vec::new();
+                let mut unread = Vec::new();
                 for path in paths {
                     match provider.track_from_path(&path) {
                         Some(track) => tracks.push(track),
                         None => {
                             log::warn!("local: cannot open {}", path.display());
+                            unread.push(Unread::of(&path));
                         }
                     }
                 }
-                anyhow::Ok(tracks)
+                anyhow::Ok((tracks, unread))
             }))
             .await;
 
             this.update(cx, |this, cx| match loaded {
-                Ok(tracks) if tracks.is_empty() => {}
-                Ok(mut tracks) if tracks.len() == 1 => {
-                    this.play_next(tracks.remove(0), cx);
-                    this.next(cx);
+                Ok((tracks, unread)) => {
+                    report_unread(&unread, tracks.is_empty(), cx);
+                    match tracks.len() {
+                        0 => {}
+                        1 => {
+                            this.place(tracks, None, QueuePlacement::Next, cx);
+                            this.next(cx);
+                        }
+                        _ => {
+                            this.place(tracks, None, QueuePlacement::Next, cx);
+                        }
+                    }
                 }
-                Ok(tracks) => this.play_next_all(tracks, None, cx),
                 Err(error) => log::warn!("playback: cannot open files: {error:#}"),
             })
             .ok();
         }));
     }
 
+    /// Inserts tracks `gap` places into the upcoming list without a word, or starts playing
+    /// them when nothing is queued.
     pub fn insert_all(
         &mut self,
         tracks: Vec<Track>,
@@ -925,16 +982,7 @@ impl Playback {
         origin: Option<Origin>,
         cx: &mut Context<Self>,
     ) {
-        if tracks.is_empty() {
-            return;
-        }
-        if self.queue.read(cx).current().is_none() {
-            self.begin(tracks, 0, origin, cx);
-            return;
-        }
-        self.queue.update(cx, |queue, cx| {
-            queue.insert_upcoming(gap, tracks, origin, cx)
-        });
+        self.place(tracks, origin, QueuePlacement::Gap(gap), cx);
     }
 
     /// Fetches a pinned collection and inserts it `gap` tracks ahead, or at the end. A pinned
@@ -1108,8 +1156,9 @@ impl Playback {
             .radio
     }
 
-    /// Fetches tracks for the queue on the tokio runtime and places them on arrival. One fetch
-    /// at a time; a second request while one runs is dropped. The tracks keep `origin` as the
+    /// Fetches tracks for the queue on the tokio runtime and places them on arrival, with a
+    /// toast once they land or the fetch fails. One fetch runs at a time, and a second request
+    /// while one runs is dropped before it shows anything. The tracks keep `origin` as the
     /// collection they were queued from.
     fn enqueue_from<F>(
         &mut self,
@@ -1135,14 +1184,8 @@ impl Playback {
                 this.enqueue = None;
                 match loaded {
                     Ok(tracks) => {
-                        let queued = this.queue.read(cx).current().is_some();
-                        match placement {
-                            QueuePlacement::Next => this.play_next_all(tracks, origin, cx),
-                            QueuePlacement::End => this.enqueue_all(tracks, origin, cx),
-                            QueuePlacement::Last => this.play_last_all(tracks, origin, cx),
-                            QueuePlacement::Gap(gap) => this.insert_all(tracks, gap, origin, cx),
-                        }
-                        if queued && let Some(key) = placement.toast(source) {
+                        let queued = this.place(tracks, origin, placement, cx);
+                        if let Some(key) = placement.toast(source).filter(|_| queued) {
                             Toasts::show(Outcome::Done, key, cx);
                         }
                     }
@@ -1314,7 +1357,7 @@ impl Playback {
         self.settings
             .update(cx, |settings, cx| settings.set_radio(radio, cx));
         match radio {
-            true => self.suggest_similar(cx),
+            true => self.suggest_similar(true, cx),
             false => self.forget_similar(cx),
         }
     }
@@ -1426,8 +1469,10 @@ impl Playback {
     /// Fills the suggestions from the current track's radio when radio is on and there are
     /// none, and tops them up once fewer than `RADIO_LOOKAHEAD` tracks are left to play, so the
     /// next batch has arrived long before the queue reaches it. What is already queued is left
-    /// out, and the provider's best `SIMILAR_LIMIT` of the rest are kept.
-    fn suggest_similar(&mut self, cx: &mut Context<Self>) {
+    /// out, and the provider's best `SIMILAR_LIMIT` of the rest are kept. A failure is shown
+    /// only when `asked`, that is when the user just turned radio on, since a top-up failing
+    /// on its own is retried at the next change.
+    fn suggest_similar(&mut self, asked: bool, cx: &mut Context<Self>) {
         if !self.radio {
             return;
         }
@@ -1453,6 +1498,7 @@ impl Playback {
 
         let queued = self.queue.read(cx).ids();
         self.seeded = Some(id.clone());
+        let title = seed.name.clone();
         let origin = Origin::radio(id.clone()).named(seed.name);
         let io = Io::global(cx);
         self.suggest = Some(cx.spawn(async move |this, cx| {
@@ -1474,6 +1520,9 @@ impl Playback {
                     this.seeded = None;
                     log::warn!("playback: cannot load similar tracks: {error:#}");
                     crate::noted(&error, cx);
+                    if asked && this.radio {
+                        Toasts::about(Outcome::Failed, "toast-similar-failed", title, cx);
+                    }
                 }
             })
             .ok();
@@ -1792,6 +1841,7 @@ impl Playback {
     }
 
     /// Replaces the active sleep request, dropping its timer task when cancelled or superseded.
+    /// A timer that runs out while music plays pauses it and says so on a toast.
     pub fn set_sleep(&mut self, sleep: Option<Sleep>, cx: &mut Context<Self>) {
         self.sleep = sleep;
         self.sleep_task = match sleep {
@@ -1799,6 +1849,9 @@ impl Playback {
                 cx.background_executor().timer(after).await;
                 this.update(cx, |this, cx| {
                     this.sleep = None;
+                    if this.wants_playing() {
+                        Toasts::show(Outcome::Info, "toast-sleep-ended", cx);
+                    }
                     this.pause(cx);
                     cx.notify();
                 })
@@ -1809,7 +1862,10 @@ impl Playback {
         cx.notify();
     }
 
+    /// Ends an end-of-track sleep request once its track has ended, holding the next track
+    /// paused, and says so on a toast.
     fn doze(&mut self, cx: &mut Context<Self>) {
+        Toasts::show(Outcome::Info, "toast-sleep-ended", cx);
         self.sleep = None;
         self.sleep_task = None;
         self.fetch = None;
@@ -2560,6 +2616,57 @@ fn song_target(track: &Track) -> Option<Target> {
         .id
         .as_deref()
         .map(|id| Target::Song(SharedString::from(id.to_owned())))
+}
+
+/// Says which files handed in from the OS could not be opened. One file is named with its
+/// reason, several are counted with their names below, and when others did open it is a
+/// warning, since those still play.
+fn report_unread(unread: &[Unread], nothing_read: bool, cx: &mut App) {
+    match (unread, nothing_read) {
+        ([], _) => {}
+        ([only], true) => match &only.error {
+            Some(error) => Toasts::with_detail(
+                Outcome::Failed,
+                "toast-open-failed",
+                Some(only.name.clone().into()),
+                error.clone(),
+                cx,
+            ),
+            None => Toasts::about(
+                Outcome::Failed,
+                "toast-open-unsupported",
+                only.name.clone(),
+                cx,
+            ),
+        },
+        (_, true) => {
+            let toast = Toast::new(Outcome::Failed, "toast-open-all-failed")
+                .count(unread.len())
+                .detail(listed(unread));
+            Toasts::post(toast, cx);
+        }
+        (_, false) => Toasts::with_detail(
+            Outcome::Warning,
+            "toast-open-some-failed",
+            None,
+            listed(unread),
+            cx,
+        ),
+    }
+}
+
+/// The names of unreadable files for a toast's detail line, cut short after `LISTED_FILES`.
+fn listed(unread: &[Unread]) -> String {
+    let mut names = unread
+        .iter()
+        .take(LISTED_FILES)
+        .map(|file| file.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if unread.len() > LISTED_FILES {
+        names.push_str(", …");
+    }
+    names
 }
 
 /// How long to wait before the retry that follows the `throttles`th refusal in a row.

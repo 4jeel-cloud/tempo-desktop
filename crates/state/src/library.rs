@@ -10,7 +10,7 @@ use music::{Album, MediaKind, MusicApi, Page, Pages, Playlist, SavedArtist, Shap
 use tokio::sync::Semaphore;
 
 use crate::snapshot::{Kind, Remembered, Snapshots};
-use crate::{Io, Network, Outcome, Session, SessionEvent, Target, Toasts, join, mosaic};
+use crate::{Io, Network, Outcome, Session, SessionEvent, Target, Toast, Toasts, join, mosaic};
 
 const FATAL: [LibraryPart; 3] = [
     LibraryPart::Tracks,
@@ -275,11 +275,134 @@ impl Addition {
 
 struct PlaylistMutation {
     action: &'static str,
-    done: &'static str,
+    /// The toast shown once the provider agrees, or `None` when `on_done` reports it itself.
+    done: Option<&'static str>,
     name: Option<String>,
     target: Option<Target>,
-    invalidated: Option<String>,
+    /// The playlists whose cached pages the change makes stale. All of them sit on `shelf`.
+    invalidated: Vec<String>,
     shelf: Shelf,
+}
+
+/// One thing a removal took out of the library, with what an Undo needs to put it back.
+#[derive(Clone)]
+enum Gone {
+    SavedTrack(Track),
+    SavedAlbum(Album),
+    SavedArtist(SavedArtist),
+    LibraryTrack(Track),
+    LibraryAlbum(Album),
+    Playlist(Playlist),
+}
+
+impl Gone {
+    fn id(&self) -> Option<&str> {
+        match self {
+            Self::SavedTrack(track) | Self::LibraryTrack(track) => track.id.as_deref(),
+            Self::SavedAlbum(album) | Self::LibraryAlbum(album) => Some(&album.id),
+            Self::SavedArtist(artist) => Some(&artist.id),
+            Self::Playlist(playlist) => Some(&playlist.id),
+        }
+    }
+
+    fn title(&self) -> &str {
+        match self {
+            Self::SavedTrack(track) | Self::LibraryTrack(track) => &track.name,
+            Self::SavedAlbum(album) | Self::LibraryAlbum(album) => &album.name,
+            Self::SavedArtist(artist) => &artist.name,
+            Self::Playlist(playlist) => &playlist.name,
+        }
+    }
+
+    fn target(&self) -> Option<Target> {
+        let id = SharedString::from(self.id()?.to_owned());
+        Some(match self {
+            Self::SavedTrack(_) | Self::LibraryTrack(_) => Target::Song(id),
+            Self::SavedAlbum(_) | Self::LibraryAlbum(_) => Target::Album(id),
+            Self::SavedArtist(_) => Target::Artist(id),
+            Self::Playlist(_) => Target::Playlist(id),
+        })
+    }
+
+    /// Which family's toast reports this removal.
+    fn family(&self) -> Family {
+        match self {
+            Self::SavedTrack(_) => Family::SavedTracks,
+            Self::SavedAlbum(_) => Family::SavedAlbums,
+            Self::SavedArtist(_) => Family::SavedArtists,
+            Self::LibraryTrack(_) => Family::LibraryTracks,
+            Self::LibraryAlbum(_) => Family::LibraryAlbums,
+            Self::Playlist(_) => Family::Playlists,
+        }
+    }
+}
+
+/// A removal and the epoch its shelf was in when the provider agreed to it.
+#[derive(Clone)]
+struct Removed {
+    gone: Gone,
+    epoch: u64,
+}
+
+/// The kinds of removal that share a toast. Removals of one family started in the same turn,
+/// or while that family's toast is still up, are reported together with one Undo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Family {
+    SavedTracks,
+    SavedAlbums,
+    SavedArtists,
+    LibraryTracks,
+    LibraryAlbums,
+    Playlists,
+}
+
+impl Family {
+    /// The toast reporting `gone`: one thing by name, several by count.
+    fn notice(self, gone: &[Removed]) -> Toast {
+        if let [removed] = gone {
+            let key = match self {
+                Self::SavedTracks | Self::SavedAlbums | Self::SavedArtists => {
+                    "toast-favorite-removed"
+                }
+                Self::LibraryTracks | Self::LibraryAlbums | Self::Playlists => {
+                    "toast-library-removed-one"
+                }
+            };
+            return Toast::new(Outcome::Done, key)
+                .name(removed.gone.title().to_owned())
+                .target(removed.gone.target());
+        }
+        let key = match self {
+            Self::SavedTracks => "toast-favorite-songs-removed",
+            Self::SavedAlbums => "toast-favorite-albums-removed",
+            Self::SavedArtists => "toast-favorite-artists-removed",
+            Self::LibraryTracks => "toast-library-songs-removed",
+            Self::LibraryAlbums => "toast-library-albums-removed",
+            Self::Playlists => "toast-playlists-removed",
+        };
+        Toast::new(Outcome::Done, key).count(gone.len())
+    }
+}
+
+/// Removals of one family that one turn of the app started. They are reported together once
+/// each has been answered.
+struct Sweep {
+    family: Family,
+    /// Answers still to come, counting the end of the turn as one.
+    left: usize,
+    gone: Vec<Removed>,
+}
+
+/// The toast a family last showed and everything its Undo puts back.
+struct Raised {
+    toast: usize,
+    gone: Vec<Removed>,
+}
+
+/// The toast a playlist's last row removals showed, and the tracks its Undo adds back.
+struct RowsRaised {
+    toast: usize,
+    tracks: Vec<String>,
 }
 
 /// Puts one part onto the shelf whole: its rows, then the word that it is complete.
@@ -432,7 +555,10 @@ fn holds_pin(items: &[music::PinTarget], uri: &str) -> bool {
 }
 
 impl Library {
-    fn toggle_saved<S: Savable>(&mut self, mut item: S, cx: &mut Context<Self>) {
+    /// Favorites `item` or takes it out of the favorites, whichever it is not now. With
+    /// `announce`, a removal is reported in a toast with an Undo once the provider agrees,
+    /// which a deliberate removal wants and a heart that can simply be clicked again does not.
+    fn toggle_saved<S: Savable>(&mut self, mut item: S, announce: bool, cx: &mut Context<Self>) {
         let Some(id) = item.id().map(str::to_owned) else {
             return;
         };
@@ -449,6 +575,7 @@ impl Library {
             item.stamp_added();
         }
         S::hold(self, item.clone(), saved);
+        let sweep = (announce && !saved).then(|| self.gather(S::FAMILY, cx));
 
         let asked = id.clone();
         let answered = id.clone();
@@ -458,9 +585,12 @@ impl Library {
             let result = join(io.spawn(S::ask(client, asked, saved))).await;
             this.update(cx, |this, cx| {
                 S::requests(this).remove(&answered);
-                match result {
-                    Ok(()) if saved => S::admit(this, item, cx),
-                    Ok(()) => {}
+                let gone = match result {
+                    Ok(()) if saved => {
+                        S::admit(this, item, cx);
+                        None
+                    }
+                    Ok(()) => previous.map(S::gone),
                     Err(error) => {
                         let name = match &previous {
                             Some(previous) => previous.title().to_owned(),
@@ -476,7 +606,11 @@ impl Library {
                             false => "toast-library-remove-failed",
                         };
                         Toasts::linked(Outcome::Failed, key, name, target, cx);
+                        None
                     }
+                };
+                if let Some(sweep) = sweep {
+                    this.answer(sweep, gone, cx);
                 }
                 cx.notify();
             })
@@ -485,13 +619,152 @@ impl Library {
         S::requests(self).insert(id, task);
         cx.notify();
     }
+
+    /// Favorites `item` again for an Undo, through the same path a click takes. An item that
+    /// is a favorite already or on its way there is left alone.
+    fn resave<S: Savable>(&mut self, item: S, cx: &mut Context<Self>) {
+        let Some(id) = item.id() else {
+            return;
+        };
+        if S::saved_now(self, id).is_some() || S::requests(self).contains_key(id) {
+            return;
+        }
+        self.toggle_saved(item, false, cx);
+    }
+
+    /// The sweep that removals of `family` started during this turn join, opened by the first
+    /// of them. The end of the turn counts as one more answer, given once the turn is over, so
+    /// a loop of removals is reported once rather than once per item.
+    fn gather(&mut self, family: Family, cx: &mut Context<Self>) -> usize {
+        if let Some(id) = self.gathering.get(&family)
+            && let Some(sweep) = self.sweeps.get_mut(id)
+        {
+            sweep.left += 1;
+            return *id;
+        }
+        let id = self.next_sweep;
+        self.next_sweep += 1;
+        self.sweeps.insert(
+            id,
+            Sweep {
+                family,
+                left: 2,
+                gone: Vec::new(),
+            },
+        );
+        self.gathering.insert(family, id);
+        let library = cx.weak_entity();
+        cx.defer(move |cx| {
+            library
+                .update(cx, |this, cx| {
+                    if this.gathering.get(&family) == Some(&id) {
+                        this.gathering.remove(&family);
+                    }
+                    this.answer(id, None, cx);
+                })
+                .ok();
+        });
+        id
+    }
+
+    /// Counts one answer toward sweep `id`, keeping what it removed, and reports the sweep once
+    /// every answer is in.
+    fn answer(&mut self, id: usize, gone: Option<Gone>, cx: &mut Context<Self>) {
+        let Some(sweep) = self.sweeps.get_mut(&id) else {
+            return;
+        };
+        if let Some(gone) = gone {
+            let shelf = gone.id().map_or(Shelf::Streaming, Shelf::of);
+            let epoch = self.epochs[shelf.slot()];
+            sweep.gone.push(Removed { gone, epoch });
+        }
+        sweep.left = sweep.left.saturating_sub(1);
+        if sweep.left > 0 {
+            return;
+        }
+        if let Some(sweep) = self.sweeps.remove(&id) {
+            self.raise(sweep.family, sweep.gone, cx);
+        }
+    }
+
+    /// Reports what a family's removals took, with an Undo that puts all of it back. A toast
+    /// the family showed before and is still up takes these in too, rather than a second one
+    /// the stack would drop as a duplicate along with its Undo.
+    fn raise(&mut self, family: Family, gone: Vec<Removed>, cx: &mut Context<Self>) {
+        if gone.is_empty() {
+            return;
+        }
+        let up = self
+            .raised
+            .remove(&family)
+            .filter(|raised| showing(raised.toast, cx));
+        let (shown, mut all) = match up {
+            Some(raised) => (Some(raised.toast), raised.gone),
+            None => (None, Vec::new()),
+        };
+        for removed in gone {
+            all.retain(|known| known.gone.id() != removed.gone.id());
+            all.push(removed);
+        }
+
+        let library = cx.weak_entity();
+        let back = all.clone();
+        let toast = family.notice(&all).undo(move |cx| {
+            library
+                .update(cx, |this, cx| this.put_back(back.clone(), cx))
+                .ok();
+        });
+        let toast = match shown {
+            Some(id) => {
+                Toasts::settle(id, toast, cx);
+                id
+            }
+            None => Toasts::post(toast, cx),
+        };
+        self.raised.insert(family, Raised { toast, gone: all });
+    }
+
+    /// Puts back what an Undo reports removed, each through the path a plain add takes.
+    /// Anything back already, on its way back, or removed under an account or folder set that
+    /// has since changed is left alone.
+    fn put_back(&mut self, gone: Vec<Removed>, cx: &mut Context<Self>) {
+        let mut playlists = Vec::new();
+        for Removed { gone, epoch } in gone {
+            let Some(id) = gone.id().map(str::to_owned) else {
+                continue;
+            };
+            if self.epochs[Shelf::of(&id).slot()] != epoch {
+                continue;
+            }
+            match gone {
+                Gone::SavedTrack(track) => self.resave(track, cx),
+                Gone::SavedAlbum(album) => self.resave(album, cx),
+                Gone::SavedArtist(artist) => self.resave(artist, cx),
+                Gone::LibraryTrack(track) if !self.in_library(&id) => {
+                    self.set_track_in_library(track, true, cx)
+                }
+                Gone::LibraryAlbum(album) if !self.in_library(&id) => {
+                    self.set_album_in_library(album, true, cx)
+                }
+                Gone::Playlist(playlist) if self.playlist(&id).is_none() => {
+                    playlists.push(playlist)
+                }
+                _ => {}
+            }
+        }
+        self.follow_again(playlists, cx);
+    }
 }
 
 trait Savable: Clone + Send + Sized + 'static {
     const TROUBLE: &'static str;
+    /// The family whose toast reports this kind's removals.
+    const FAMILY: Family;
 
     fn id(&self) -> Option<&str>;
     fn title(&self) -> &str;
+    /// What an Undo needs to favorite this again.
+    fn gone(self) -> Gone;
     fn target(id: &str) -> Option<Target>;
     fn stamp_added(&mut self) {}
     fn saved_now(library: &Library, id: &str) -> Option<Self>;
@@ -509,6 +782,11 @@ trait Savable: Clone + Send + Sized + 'static {
 
 impl Savable for Track {
     const TROUBLE: &'static str = "saved track";
+    const FAMILY: Family = Family::SavedTracks;
+
+    fn gone(self) -> Gone {
+        Gone::SavedTrack(self)
+    }
 
     fn id(&self) -> Option<&str> {
         self.id.as_deref()
@@ -570,6 +848,11 @@ impl Savable for Track {
 
 impl Savable for Album {
     const TROUBLE: &'static str = "saved album";
+    const FAMILY: Family = Family::SavedAlbums;
+
+    fn gone(self) -> Gone {
+        Gone::SavedAlbum(self)
+    }
 
     fn id(&self) -> Option<&str> {
         Some(&self.id)
@@ -611,6 +894,11 @@ impl Savable for Album {
 
 impl Savable for SavedArtist {
     const TROUBLE: &'static str = "favorite artist";
+    const FAMILY: Family = Family::SavedArtists;
+
+    fn gone(self) -> Gone {
+        Gone::SavedArtist(self)
+    }
 
     fn id(&self) -> Option<&str> {
         Some(&self.id)
@@ -652,8 +940,15 @@ impl Savable for SavedArtist {
 
 pub enum LibraryEvent {
     PlaylistGone(String),
-    TrackAdded { playlist: String },
-    TrackDropped { playlist: String, track: String },
+    /// A playlist an Undo brought back into the library after `PlaylistGone` took it out.
+    PlaylistBack(String),
+    TrackAdded {
+        playlist: String,
+    },
+    TrackDropped {
+        playlist: String,
+        track: String,
+    },
     TracksHidden(Vec<String>),
 }
 
@@ -796,6 +1091,16 @@ pub struct Library {
     mosaics: HashMap<String, Task<()>>,
     snapshots: Snapshots,
     priming: [Option<Task<()>>; 2],
+    /// Counts the accounts and folder sets each shelf has had, so an Undo made under one never
+    /// acts on the next.
+    epochs: [u64; 2],
+    sweeps: HashMap<usize, Sweep>,
+    /// The sweep each family is gathering this turn's removals into.
+    gathering: HashMap<Family, usize>,
+    next_sweep: usize,
+    raised: HashMap<Family, Raised>,
+    /// The row removals whose toast is up, by playlist id.
+    raised_rows: HashMap<String, RowsRaised>,
 }
 
 impl Library {
@@ -807,6 +1112,7 @@ impl Library {
     ) -> Self {
         cx.subscribe(&session, |this, session, event, cx| match event {
             SessionEvent::SignedIn => {
+                this.epochs[Shelf::Streaming.slot()] += 1;
                 this.pin_task = None;
                 if !session.read(cx).authenticated() {
                     this.pin_targets_task = None;
@@ -821,6 +1127,11 @@ impl Library {
                 this.load(Shelf::Streaming, cx);
             }
             SessionEvent::SignedOut => {
+                this.epochs[Shelf::Streaming.slot()] += 1;
+                this.sweeps.clear();
+                this.gathering.clear();
+                this.raised.clear();
+                this.raised_rows.clear();
                 this.forget(Shelf::Streaming, cx);
                 this.pin_task = None;
                 this.pin_targets_task = None;
@@ -842,6 +1153,7 @@ impl Library {
                 }
             }
             SessionEvent::LocalChanged => {
+                this.epochs[Shelf::Local.slot()] += 1;
                 this.hidden_local_tracks.clear();
                 match session.read(cx).client_of(Shelf::Local) {
                     Some(_) => this.load(Shelf::Local, cx),
@@ -872,6 +1184,12 @@ impl Library {
             mosaics: HashMap::new(),
             snapshots: Snapshots::new(cache),
             priming: [None, None],
+            epochs: [0, 0],
+            sweeps: HashMap::new(),
+            gathering: HashMap::new(),
+            next_sweep: 0,
+            raised: HashMap::new(),
+            raised_rows: HashMap::new(),
         };
         library.held_mut(Shelf::Streaming).state = LibraryState::Loading;
         library.held_mut(Shelf::Local).shape = Shape::Catalog;
@@ -1237,10 +1555,13 @@ impl Library {
         self.pending.contains_key(track_id)
     }
 
+    /// Flips the heart on a track. Nothing is announced, since the heart is the way back.
     pub fn toggle(&mut self, track: Track, cx: &mut Context<Self>) {
-        self.toggle_saved(track, cx);
+        self.toggle_saved(track, false, cx);
     }
 
+    /// Favorites every track not yet a favorite, or takes every favorite out. Taking them out
+    /// is reported in one toast with an Undo.
     pub fn save_tracks(&mut self, tracks: Vec<Track>, saved: bool, cx: &mut Context<Self>) {
         for track in tracks {
             let Some(id) = track.id.as_deref() else {
@@ -1249,7 +1570,7 @@ impl Library {
             if self.saved(id) == saved || self.pending(id) {
                 continue;
             }
-            self.toggle_saved(track, cx);
+            self.toggle_saved(track, !saved, cx);
         }
     }
 
@@ -1275,12 +1596,9 @@ impl Library {
         present: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = track.id.clone() else {
-            return;
-        };
-        let name = track.name.clone();
+        let gone = Gone::LibraryTrack(track.clone());
         track.stamp_added();
-        self.set_in_library(id, MediaKind::Track, name, present, cx, move |ready| {
+        self.set_in_library(MediaKind::Track, present, gone, cx, move |ready| {
             ready.tracks.retain(|known| known.id != track.id);
             if present {
                 ready.tracks.insert(0, track);
@@ -1294,10 +1612,9 @@ impl Library {
         present: bool,
         cx: &mut Context<Self>,
     ) {
-        let id = album.id.clone();
-        let name = album.name.clone();
+        let gone = Gone::LibraryAlbum(album.clone());
         album.stamp_added();
-        self.set_in_library(id, MediaKind::Album, name, present, cx, move |ready| {
+        self.set_in_library(MediaKind::Album, present, gone, cx, move |ready| {
             ready.albums.retain(|known| known.id != album.id);
             if present {
                 ready.albums.insert(0, album);
@@ -1307,16 +1624,20 @@ impl Library {
 
     /// Asks the provider to put one item into its library or take it out, and applies
     /// `place` to the shelf's pages once it agrees, so they follow without a reload. A second
-    /// ask about the same item while the first is out is dropped.
+    /// ask about the same item while the first is out is dropped. A removal is reported with
+    /// an Undo that puts `gone` back, and removals in the same turn share one toast.
     fn set_in_library(
         &mut self,
-        id: String,
         kind: MediaKind,
-        name: String,
         present: bool,
+        gone: Gone,
         cx: &mut Context<Self>,
         place: impl FnOnce(&mut Ready) + 'static,
     ) {
+        let Some(id) = gone.id().map(str::to_owned) else {
+            return;
+        };
+        let name = gone.title().to_owned();
         if self.pending_library.contains_key(&id) {
             return;
         }
@@ -1324,6 +1645,7 @@ impl Library {
         let Some(client) = self.session.read(cx).client_of(shelf) else {
             return;
         };
+        let sweep = (!present).then(|| self.gather(gone.family(), cx));
         let asked = id.clone();
         let answered = id.clone();
         let io = self.io.clone();
@@ -1338,13 +1660,15 @@ impl Library {
                         if let Some(ready) = this.held_mut(shelf).ready_mut() {
                             place(ready);
                         }
-                        let done = match present {
-                            true => "toast-library-added",
-                            false => "toast-library-removed",
-                        };
-                        Toasts::show(Outcome::Done, done, cx);
+                        match sweep {
+                            Some(sweep) => this.answer(sweep, Some(gone), cx),
+                            None => Toasts::show(Outcome::Done, "toast-library-added", cx),
+                        }
                     }
                     Err(error) => {
+                        if let Some(sweep) = sweep {
+                            this.answer(sweep, None, cx);
+                        }
                         log::warn!("library: cannot change the library: {error:#}");
                         let failed = match present {
                             true => "toast-library-add-failed",
@@ -1369,8 +1693,15 @@ impl Library {
         self.pending_albums.contains_key(album_id)
     }
 
+    /// Favorites an album or takes it out of the favorites. A removal is reported with an Undo,
+    /// and removals in the same turn share one toast.
     pub fn toggle_album(&mut self, album: Album, cx: &mut Context<Self>) {
-        self.toggle_saved(album, cx);
+        self.toggle_saved(album, true, cx);
+    }
+
+    /// Flips the heart on an album. Nothing is announced, since the heart is the way back.
+    pub fn heart_album(&mut self, album: Album, cx: &mut Context<Self>) {
+        self.toggle_saved(album, false, cx);
     }
 
     fn set_album_saved(&mut self, album: Album, saved: bool) {
@@ -1408,8 +1739,15 @@ impl Library {
             .find(|artist| artist.id == id)
     }
 
+    /// Follows an artist or unfollows them. An unfollow is reported with an Undo, and
+    /// unfollows in the same turn share one toast.
     pub fn toggle_artist(&mut self, artist: SavedArtist, cx: &mut Context<Self>) {
-        self.toggle_saved(artist, cx);
+        self.toggle_saved(artist, true, cx);
+    }
+
+    /// Flips the heart on an artist. Nothing is announced, since the heart is the way back.
+    pub fn heart_artist(&mut self, artist: SavedArtist, cx: &mut Context<Self>) {
+        self.toggle_saved(artist, false, cx);
     }
 
     fn set_artist_saved(&mut self, artist: SavedArtist, saved: bool) {
@@ -1435,10 +1773,10 @@ impl Library {
         self.mutate_playlist(
             PlaylistMutation {
                 action: "create playlist",
-                done: "toast-playlist-created",
+                done: Some("toast-playlist-created"),
                 name: None,
                 target: None,
-                invalidated: None,
+                invalidated: Vec::new(),
                 shelf,
             },
             move |client| async move {
@@ -1475,11 +1813,11 @@ impl Library {
         self.mutate_playlist(
             PlaylistMutation {
                 action: "rename playlist",
-                done: "toast-playlist-renamed",
+                done: Some("toast-playlist-renamed"),
                 name: None,
                 target: None,
                 shelf: Shelf::of(&id),
-                invalidated: Some(id.clone()),
+                invalidated: vec![id.clone()],
             },
             move |client| async move { client.rename_playlist(&id, &name).await },
             move |this, _, cx| {
@@ -1495,11 +1833,11 @@ impl Library {
         self.mutate_playlist(
             PlaylistMutation {
                 action: "change playlist visibility",
-                done: "toast-playlist-visibility",
+                done: Some("toast-playlist-visibility"),
                 name: None,
                 target: None,
                 shelf: Shelf::of(&id),
-                invalidated: Some(id.clone()),
+                invalidated: vec![id.clone()],
             },
             move |client| async move { client.set_playlist_public(&id, public).await },
             move |this, _, cx| {
@@ -1542,11 +1880,11 @@ impl Library {
         self.mutate_playlist(
             PlaylistMutation {
                 action: "add track to playlist",
-                done: "toast-track-added",
+                done: Some("toast-track-added"),
                 name,
                 target,
                 shelf: Shelf::of(&playlist_id),
-                invalidated: Some(playlist_id.clone()),
+                invalidated: vec![playlist_id.clone()],
             },
             move |client| async move {
                 let mut track_ids = addition.resolve(&client).await?;
@@ -1577,6 +1915,8 @@ impl Library {
         self.remove_tracks_from_playlist(playlist_id, vec![track_id], cx);
     }
 
+    /// Takes tracks out of a playlist and reports it once the provider agrees, with an Undo that
+    /// adds them back at the end, the way every provider adds.
     pub fn remove_tracks_from_playlist(
         &mut self,
         playlist_id: String,
@@ -1592,15 +1932,15 @@ impl Library {
         let name = self
             .playlist(&playlist_id)
             .map(|playlist| playlist.name.clone());
-        let target = Some(Target::Playlist(SharedString::from(playlist_id.clone())));
+        let shelf = Shelf::of(&playlist_id);
         self.mutate_playlist(
             PlaylistMutation {
                 action: "remove track from playlist",
-                done: "toast-track-removed",
-                name,
-                target,
-                shelf: Shelf::of(&playlist_id),
-                invalidated: Some(playlist_id.clone()),
+                done: None,
+                name: None,
+                target: None,
+                shelf,
+                invalidated: vec![playlist_id.clone()],
             },
             move |client| async move {
                 for track_id in &track_ids {
@@ -1610,7 +1950,8 @@ impl Library {
                 }
                 Ok(())
             },
-            move |this, _, cx| {
+            move |this, (), cx| {
+                this.raise_rows(&emptied, name, dropped.clone(), cx);
                 this.amend_playlist(
                     &emptied,
                     |playlist| {
@@ -1639,11 +1980,11 @@ impl Library {
         self.mutate_playlist(
             PlaylistMutation {
                 action: "delete playlist",
-                done: "toast-playlist-deleted",
+                done: Some("toast-playlist-deleted"),
                 name: None,
                 target: None,
                 shelf: Shelf::of(&id),
-                invalidated: Some(id.clone()),
+                invalidated: vec![id.clone()],
             },
             move |client| async move { client.delete_playlist(&id).await },
             move |this, _, cx| this.forget_playlist(&deleted, cx),
@@ -1656,11 +1997,11 @@ impl Library {
         self.mutate_playlist(
             PlaylistMutation {
                 action: "add playlist to library",
-                done: "toast-playlist-added",
+                done: Some("toast-playlist-added"),
                 name: None,
                 target: None,
                 shelf: Shelf::of(&id),
-                invalidated: Some(id.clone()),
+                invalidated: vec![id.clone()],
             },
             move |client| async move { client.add_playlist_to_library(&id).await },
             move |this, _, cx| this.insert_playlist(playlist, cx),
@@ -1669,20 +2010,172 @@ impl Library {
     }
 
     pub fn remove_playlist_from_library(&mut self, id: String, cx: &mut Context<Self>) {
-        let removed = id.clone();
+        self.remove_playlists_from_library(vec![id], cx);
+    }
+
+    /// Takes playlists out of the library in one change, and reports it with an Undo that puts
+    /// them back. They all have to sit on the shelf of the first. A failure after some went
+    /// through stops the rest, and only the ones that went are reported.
+    pub fn remove_playlists_from_library(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        let Some(first) = ids.first() else {
+            return;
+        };
+        let shelf = Shelf::of(first);
+        let ids: Vec<String> = ids
+            .into_iter()
+            .filter(|id| Shelf::of(id) == shelf)
+            .collect();
+        let known: Vec<Playlist> = ids
+            .iter()
+            .filter_map(|id| self.playlist(id).cloned())
+            .collect();
         self.mutate_playlist(
             PlaylistMutation {
                 action: "remove playlist from library",
-                done: "toast-playlist-removed",
+                done: None,
                 name: None,
                 target: None,
-                shelf: Shelf::of(&id),
-                invalidated: Some(id.clone()),
+                shelf,
+                invalidated: ids.clone(),
             },
-            move |client| async move { client.remove_playlist_from_library(&id).await },
-            move |this, _, cx| this.forget_playlist(&removed, cx),
+            move |client| async move {
+                each(ids, |id| {
+                    let client = client.clone();
+                    async move { client.remove_playlist_from_library(&id).await }
+                })
+                .await
+            },
+            move |this, removed, cx| {
+                for id in &removed {
+                    this.forget_playlist(id, cx);
+                }
+                let epoch = this.epochs[shelf.slot()];
+                let gone: Vec<Removed> = known
+                    .into_iter()
+                    .filter(|playlist| removed.contains(&playlist.id))
+                    .map(|playlist| Removed {
+                        gone: Gone::Playlist(playlist),
+                        epoch,
+                    })
+                    .collect();
+                match gone.is_empty() {
+                    true => Toasts::show(Outcome::Done, "toast-playlist-removed", cx),
+                    false => this.raise(Family::Playlists, gone, cx),
+                }
+            },
             cx,
         );
+    }
+
+    /// Follows playlists again for an Undo, in one change, and brings back the pins that left
+    /// with them.
+    fn follow_again(&mut self, playlists: Vec<Playlist>, cx: &mut Context<Self>) {
+        let Some(first) = playlists.first() else {
+            return;
+        };
+        let shelf = Shelf::of(&first.id);
+        let ids: Vec<String> = playlists
+            .iter()
+            .map(|playlist| playlist.id.clone())
+            .collect();
+        self.mutate_playlist(
+            PlaylistMutation {
+                action: "add playlist to library",
+                done: Some("toast-playlist-added"),
+                name: None,
+                target: None,
+                shelf,
+                invalidated: ids.clone(),
+            },
+            move |client| async move {
+                each(ids, |id| {
+                    let client = client.clone();
+                    async move { client.add_playlist_to_library(&id).await }
+                })
+                .await
+            },
+            move |this, added, cx| {
+                for playlist in playlists {
+                    if !added.contains(&playlist.id) {
+                        continue;
+                    }
+                    let id = playlist.id.clone();
+                    this.insert_playlist(playlist, cx);
+                    cx.emit(LibraryEvent::PlaylistBack(id));
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Reports tracks taken out of a playlist. The toast still up for the same playlist is
+    /// replaced with one counting both removals, and its Undo adds all of them back.
+    fn raise_rows(
+        &mut self,
+        playlist_id: &str,
+        name: Option<String>,
+        removed: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let up = self
+            .raised_rows
+            .remove(playlist_id)
+            .filter(|raised| showing(raised.toast, cx));
+        let (shown, mut tracks) = match up {
+            Some(raised) => (Some(raised.toast), raised.tracks),
+            None => (None, Vec::new()),
+        };
+        tracks.extend(removed);
+        let target = Some(Target::Playlist(SharedString::from(playlist_id.to_owned())));
+        let mut toast = match tracks.len() {
+            1 => Toast::new(Outcome::Done, "toast-track-removed"),
+            count => Toast::new(Outcome::Done, "toast-tracks-removed").count(count),
+        }
+        .target(target);
+        if let Some(name) = name {
+            toast = toast.name(name);
+        }
+        let library = cx.weak_entity();
+        let playlist = playlist_id.to_owned();
+        let epoch = self.epochs[Shelf::of(playlist_id).slot()];
+        let back = tracks.clone();
+        let toast = toast.undo(move |cx| {
+            library
+                .update(cx, |this, cx| {
+                    this.put_tracks_back(playlist.clone(), back.clone(), epoch, cx)
+                })
+                .ok();
+        });
+        let toast = match shown {
+            Some(id) => {
+                Toasts::settle(id, toast, cx);
+                id
+            }
+            None => Toasts::post(toast, cx),
+        };
+        self.raised_rows
+            .insert(playlist_id.to_owned(), RowsRaised { toast, tracks });
+    }
+
+    /// Adds removed tracks back to a playlist for an Undo, skipping any the playlist holds
+    /// again. Nothing happens once the account or folders behind the playlist have changed.
+    fn put_tracks_back(
+        &mut self,
+        playlist_id: String,
+        tracks: Vec<String>,
+        epoch: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.epochs[Shelf::of(&playlist_id).slot()] != epoch {
+            return;
+        }
+        self.raised_rows.remove(&playlist_id);
+        let held = self.contents.get(&playlist_id);
+        let tracks: Vec<String> = tracks
+            .into_iter()
+            .filter(|track| !held.is_some_and(|held| held.contains(track)))
+            .collect();
+        self.add_tracks_to_playlist(playlist_id, Addition::Tracks(tracks), cx);
     }
 
     /// A listed album, from the shelf's pages or its favorites.
@@ -1919,24 +2412,29 @@ impl Library {
             return;
         };
         let catalog = invalidated
-            .as_deref()
+            .first()
             .and_then(|id| self.session.read(cx).catalog(id));
         let io = self.io.clone();
         self.playlist_task = Some(cx.spawn(async move |this, cx| {
             let result = join(io.spawn(async move { mutation(client).await })).await;
             if result.is_ok()
-                && let (Some(catalog), Some(id)) = (catalog, invalidated)
+                && let Some(catalog) = catalog
             {
-                catalog.invalidate_playlist(&id).await;
+                for id in &invalidated {
+                    catalog.invalidate_playlist(id).await;
+                }
             }
             this.update(cx, |this, cx| {
                 this.playlist_task = None;
                 match result {
                     Ok(outcome) => {
                         on_done(this, outcome, cx);
-                        match name {
-                            Some(name) => Toasts::linked(Outcome::Done, done, name, target, cx),
-                            None => Toasts::show(Outcome::Done, done, cx),
+                        match (done, name) {
+                            (Some(done), Some(name)) => {
+                                Toasts::linked(Outcome::Done, done, name, target, cx)
+                            }
+                            (Some(done), None) => Toasts::show(Outcome::Done, done, cx),
+                            (None, _) => {}
                         }
                     }
                     Err(error) => {
@@ -2041,6 +2539,14 @@ impl Library {
             self.pending.clear();
             self.pending_albums.clear();
             self.pending_artists.clear();
+            let favorite = |family: &Family| {
+                matches!(
+                    family,
+                    Family::SavedTracks | Family::SavedAlbums | Family::SavedArtists
+                )
+            };
+            self.sweeps.retain(|_, sweep| !favorite(&sweep.family));
+            self.gathering.retain(|family, _| !favorite(family));
         }
 
         let held = self.held_mut(shelf);
@@ -2249,4 +2755,31 @@ impl Library {
         }
         cx.notify();
     }
+}
+
+/// Whether toast `id` is still on screen.
+fn showing(id: usize, cx: &mut App) -> bool {
+    let toasts = Toasts::entity(cx);
+    toasts.read(cx).shown().iter().any(|toast| toast.id == id)
+}
+
+/// Runs `step` for each id in turn and answers the ids it went through for. A failure fails
+/// the whole while nothing has gone through yet, and afterwards only stops the rest.
+async fn each<F, R>(ids: Vec<String>, mut step: F) -> anyhow::Result<Vec<String>>
+where
+    F: FnMut(String) -> R,
+    R: Future<Output = anyhow::Result<()>>,
+{
+    let mut done = Vec::new();
+    for id in ids {
+        match step(id.clone()).await {
+            Ok(()) => done.push(id),
+            Err(error) if done.is_empty() => return Err(error),
+            Err(error) => {
+                log::warn!("library: cannot finish a playlist change: {error:#}");
+                break;
+            }
+        }
+    }
+    Ok(done)
 }

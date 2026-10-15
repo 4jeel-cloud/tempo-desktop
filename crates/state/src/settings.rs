@@ -423,10 +423,11 @@ enum SettingsReload {
     Retry,
 }
 
-/// Whether a settings save should be tried again after a transient failure.
+/// Whether a settings save should be tried again after a transient failure, which carries the
+/// error so the last attempt can show it.
 enum SettingsSave {
     Complete,
-    Retry,
+    Retry(String),
 }
 
 impl Default for Values {
@@ -671,6 +672,9 @@ pub struct AppSettings {
     /// The watch on the config folder. Dropping it ends the watch.
     watcher: Option<RecommendedWatcher>,
     reload: Option<Task<()>>,
+    /// Set once a save gives up after its retries, so the failure toast shows once until a
+    /// save lands again.
+    failing: bool,
 }
 
 /// Emitted after settings reload or the selected custom palette changes.
@@ -729,6 +733,7 @@ impl AppSettings {
             broken,
             watcher: None,
             reload: None,
+            failing: false,
         }
     }
 
@@ -1833,10 +1838,14 @@ impl AppSettings {
         self.save = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DELAY).await;
             for attempt in 0..=SAVE_RETRIES {
-                let Ok(result) = this.update(cx, |this, _| this.save_now()) else {
+                let Ok(result) = this.update(cx, |this, cx| this.save_now(cx)) else {
                     break;
                 };
-                if !matches!(result, SettingsSave::Retry) || attempt == SAVE_RETRIES {
+                let SettingsSave::Retry(error) = result else {
+                    break;
+                };
+                if attempt == SAVE_RETRIES {
+                    this.update(cx, |this, cx| this.give_up(error, cx)).ok();
                     break;
                 }
                 cx.background_executor().timer(SAVE_RETRY_DELAY).await;
@@ -1864,8 +1873,23 @@ impl AppSettings {
         }
     }
 
-    /// Writes `settings.json` now, or logs why it cannot.
-    fn save_now(&mut self) -> SettingsSave {
+    /// Tells the user that `settings.json` could not be written, once per run of failed saves.
+    fn give_up(&mut self, error: String, cx: &mut App) {
+        if std::mem::replace(&mut self.failing, true) {
+            return;
+        }
+        Toasts::with_detail(
+            Outcome::Failed,
+            "toast-settings-save-failed",
+            None,
+            error,
+            cx,
+        );
+    }
+
+    /// Writes `settings.json` now, or logs why it cannot. A save skipped because another
+    /// program changed the file warns the user when the reload that follows drops their change.
+    fn save_now(&mut self, cx: &mut App) -> SettingsSave {
         if !self.writable {
             return SettingsSave::Complete;
         }
@@ -1874,7 +1898,7 @@ impl AppSettings {
         };
         if let Err(error) = fs::create_dir_all(parent) {
             log::error!("settings: cannot create {}: {error}", parent.display());
-            return SettingsSave::Retry;
+            return SettingsSave::Retry(error.to_string());
         }
 
         let bytes = match serde_json::to_vec_pretty(&self.values) {
@@ -1889,7 +1913,7 @@ impl AppSettings {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 log::warn!("settings: cannot read {}: {error}", self.path.display());
-                return SettingsSave::Retry;
+                return SettingsSave::Retry(error.to_string());
             }
         };
         if current != self.disk {
@@ -1897,13 +1921,20 @@ impl AppSettings {
                 "settings: not saving {}, file changed on disk",
                 self.path.display()
             );
+            if current
+                .as_deref()
+                .is_some_and(|current| overrides(current, &bytes))
+            {
+                Toasts::show(Outcome::Warning, "toast-settings-overwritten", cx);
+            }
             return SettingsSave::Complete;
         }
         if let Err(error) = fs::write(&self.path, &bytes) {
             log::error!("settings: cannot write {}: {error}", self.path.display());
-            return SettingsSave::Retry;
+            return SettingsSave::Retry(error.to_string());
         }
         self.disk = Some(bytes);
+        self.failing = false;
         SettingsSave::Complete
     }
 
@@ -2268,6 +2299,15 @@ fn load_themes(directory: &Path, previous: &[CustomTheme]) -> LoadedThemes {
             .then_with(|| left.id.cmp(&right.id))
     });
     LoadedThemes { themes, retry }
+}
+
+/// Whether reloading `current` from disk would replace the values that serialize to `ours`. A
+/// file that does not parse is left to the broken-file toast, since the reload keeps our values.
+fn overrides(current: &[u8], ours: &[u8]) -> bool {
+    serde_json::from_slice::<Values>(json(current))
+        .ok()
+        .and_then(|theirs| serde_json::to_vec_pretty(&theirs).ok())
+        .is_some_and(|theirs| theirs != ours)
 }
 
 /// The JSON in a file without the UTF-8 byte order mark that Notepad and PowerShell can put in

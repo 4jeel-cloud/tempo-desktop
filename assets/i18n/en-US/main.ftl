@@ -820,6 +820,19 @@ toast-queued-artist = Artist added to the queue
 toast-next-artist = Artist plays next
 toast-last-artist = Artist plays last
 toast-queue-failed = That could not be added to the queue
+toast-queued-tracks = { $count } tracks added to the queue
+toast-next-tracks = { $count } tracks play next
+toast-last-tracks = { $count } tracks play last
+toast-queue-cleared = Queue cleared
+toast-queue-removed-track = Removed { $name } from the queue
+toast-queue-removed-tracks = Removed { $count } tracks from the queue
+toast-sleep-ended = Sleep timer ended
+toast-radio-failed = Could not start radio for { $name }
+toast-similar-failed = Could not find tracks similar to { $name }
+toast-open-failed = Could not open { $name }
+toast-open-unsupported = { $name } is not an audio file Sonora can play
+toast-open-all-failed = { $count } files could not be opened
+toast-open-some-failed = Some files could not be opened
 toast-keys-refused = Spotify is not granting this account playback keys
 toast-sign-in-to-play = { $name } only streams to a signed-in listener
 toast-track-unplayable = { $name } could not be played
@@ -830,6 +843,37 @@ toast-library-add-failed = { $name } could not be added to your library
 toast-library-remove-failed = { $name } could not be removed from your library
 toast-library-added = Added to your library
 toast-library-removed = Removed from your library
+toast-library-removed-one = Removed { $name } from your library
+toast-library-songs-removed = Removed { $count ->
+        [one] one song
+       *[other] { $count } songs
+    } from your library
+toast-library-albums-removed = Removed { $count ->
+        [one] one album
+       *[other] { $count } albums
+    } from your library
+toast-playlists-removed = Removed { $count ->
+        [one] one playlist
+       *[other] { $count } playlists
+    } from your library
+toast-favorite-removed = Removed { $name } from your favorites
+toast-favorite-songs-removed = Removed { $count ->
+        [one] one song
+       *[other] { $count } songs
+    } from your favorites
+toast-favorite-albums-removed = Removed { $count ->
+        [one] one album
+       *[other] { $count } albums
+    } from your favorites
+toast-favorite-artists-removed = Removed { $count ->
+        [one] one artist
+       *[other] { $count } artists
+    } from your favorites
+toast-tracks-removed = Removed { $count ->
+        [one] one song
+       *[other] { $count } songs
+    } from { $name }
+toast-unpinned = Unpinned { $name }
 
 # lyrics
 lyrics-title = Lyrics
@@ -909,6 +953,50 @@ trouble-retry = Try again
 toast-offline = No connection. Nothing will stream until it is back.
 toast-settings-broken = Fix line { $name } of settings.json to save changes
 toast-tray-unavailable = There is no system tray to put the icon in
+toast-undo = Undo
+toast-link-copied = Link copied
+menu-copy-link-none = This has no link to share
+menu-copy-link-local = Local artists and playlists have no link
+toast-settings-save-failed = Settings could not be saved
+toast-settings-overwritten = settings.json changed on disk, so your last change was not saved
+toast-widevine-download-failed = Widevine could not be downloaded
+toast-widevine-install-failed = Widevine could not be installed
+toast-widevine-remove-failed = Widevine could not be removed
+toast-library-scanned = { $count ->
+    [one] Library scanned, one song found
+   *[other] Library scanned, { $count } songs found
+}
+toast-scan-failed = Your music folders could not be scanned
+toast-folder-removed = Removed { $name }
+toast-folder-missing = { $name } is no longer on disk
+toast-history-removed = { $count ->
+    [one] Removed from history
+   *[other] Removed { $count } songs from history
+}
+toast-history-remove-failed = A song could not be removed from history
+toast-history-restore-failed = History could not be restored
+toast-history-clear-failed = History could not be cleared
 
 # power
 wake-reason = Music is playing
+
+toast-sample-plain = Event has been created
+toast-sample-done = Saved to your library
+toast-sample-info = Arrive 10 minutes before the event.
+toast-sample-warning = Your session ends in five minutes
+toast-sample-failed = The server could not be reached
+toast-sample-loading = Uploading your tracks
+toast-sample-event = Event created
+toast-sample-event-detail = Sunday, December 3 at 9:00 AM
+toast-sample-delete = Deleted { $name }
+toast-sample-undo = Undo
+toast-sample-cancel = Cancel
+toast-sample-undone = Undone
+toast-sample-queued = { $name } added to the queue
+toast-sample-long = This toast says a good deal more than the others, so the text has to wrap onto a second and maybe a third line without pushing the close button out of the card
+toast-sample-saving = Saving { $name }
+toast-sample-saved = Saved { $name }
+toast-sample-save-failed = { $name } could not be saved
+toast-sample-save-failed-detail = The server answered 503 Service Unavailable
+toast-sample-lasting = This one stays until you close it
+toast-sample-burst = Toast number { $name }
