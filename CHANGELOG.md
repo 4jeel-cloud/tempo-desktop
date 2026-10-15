@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- On Linux, dragging a lyrics provider now shows a closed-hand cursor.
+
 ### Added
 
 - Order lyrics providers in Settings. Sonora tries enabled sources in that order and stops

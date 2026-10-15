@@ -12,7 +12,8 @@ use crate::shared::text;
 use crate::shared::veil::{Edge, veil};
 use gpui::{
     AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, FontWeight,
-    MouseButton, MouseUpEvent, Pixels, Render, SharedString, Task, Window, div, px, relative,
+    MouseButton, MouseUpEvent, Pixels, Render, SharedString, Task, Window, canvas, div, px,
+    relative,
 };
 use gpui::{ScrollHandle, prelude::*, svg};
 use i18n::{Language, t};
@@ -342,6 +343,13 @@ impl Render for DraggedLyricsProvider {
             .text_color(theme.foreground)
             .text_size(theme.text(Text::Body))
             .line_height(relative(LEADING))
+            .when(cfg!(target_os = "linux"), |preview| {
+                // Linux does not apply GPUI's active drag cursor to the window.
+                preview.child(canvas(
+                    |_, _, _| (),
+                    |_, _, window, _| window.set_window_cursor_style(PROVIDER_DRAG_CURSOR),
+                ))
+            })
             .child(
                 div()
                     .truncate()
