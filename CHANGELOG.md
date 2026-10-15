@@ -9,8 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Reorder lyrics providers in Settings by dragging them or using the arrows. Sonora tries
-  enabled sources in that order until lyrics are found. Prefer local lyrics still takes precedence.
+- You can rank your lyrics providers in Settings, by dragging them or with the arrows. When two
+  of them have equally good lyrics for a song, Sonora shows the one you ranked higher.
 - You can undo clearing the queue or removing songs from it. Press Undo on the toast that
   appears.
 - Adding a whole album, playlist or artist to the queue shows that it is on its way, and
@@ -27,6 +27,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Prefer local lyrics switch is gone. Lyrics in a file's own tags now compete with the
+  online providers, so synced lyrics found online beat plain ones in the file. Rank Local first
+  to have it win when both are equally good.
 - Toasts have a new look. New ones pile up in front of older ones, and pointing at the pile
   spreads it out and keeps every toast on screen until you move away. Drag a toast to the right
   to dismiss it.
