@@ -417,7 +417,8 @@ impl FullscreenView {
                                 .child(
                                     Artwork::new(Some(url))
                                         .size(raster_side)
-                                        .corner_radius(radius),
+                                        .corner_radius(radius)
+                                        .overlay(),
                                 )
                                 .motion(("cover-large", revision), Motion::Slow, |art, t| {
                                     art.opacity(t)
