@@ -1,11 +1,25 @@
+use std::borrow::Cow;
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{App, Context, Render, SharedString, Task, Window, div};
+use gpui::{
+    App, Bounds, Context, Div, Entity, Pixels, Render, SharedString, Task, Window, WindowBounds,
+    WindowOptions, div, px, size,
+};
 use i18n::t;
+use router::Destination;
 use state::{Outcome, Toast, Toasts};
-use ui::{ActiveTheme as _, Button, Text, eyebrow, heading};
+use ui::{ActiveTheme as _, Button, Look, Rounding, Text, Theme, ThemeKind, eyebrow, heading};
+use views::ToastStack;
 
+const INTER: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/fonts/Inter-Regular.ttf"
+));
+
+const FIRST_SIZE: gpui::Size<Pixels> = size(px(900.), px(720.));
+/// The strip at the bottom the stack hangs from, standing in for the player bar.
+const BAR: Pixels = px(88.);
 /// How long a sample promise works before it settles.
 const WORK: Duration = Duration::from_secs(2);
 /// How many toasts the burst sample shows.
@@ -13,22 +27,26 @@ const BURST: usize = 5;
 /// The name the samples put in bold.
 const NAME: &str = "Midnight City";
 
-/// One button on the page: its id, the Fluent key of its label, and the toast it shows.
+/// One button on the page: its id, its label, and the toast it shows.
 type Sample = (
     &'static str,
     &'static str,
-    fn(&mut ToastsView, &mut Context<ToastsView>),
+    fn(&mut Page, &mut Context<Page>),
 );
 
 /// A page with a button for every kind of toast, so each one can be tried without waiting for
 /// the app to need it.
-pub(crate) struct ToastsView {
+struct Page {
+    stack: Entity<ToastStack>,
     work: Vec<Task<()>>,
 }
 
-impl ToastsView {
-    pub(crate) fn new(_: &mut Context<Self>) -> Self {
-        Self { work: Vec::new() }
+impl Page {
+    fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            stack: cx.new(ToastStack::new),
+            work: Vec::new(),
+        }
     }
 
     /// Shows a loading toast and settles it into a success or a failure once the work is done.
@@ -51,17 +69,12 @@ impl ToastsView {
         }));
     }
 
-    fn group(
-        &self,
-        key: &'static str,
-        samples: &[Sample],
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn group(&self, title: &'static str, samples: &[Sample], cx: &mut Context<Self>) -> Div {
         div()
             .flex()
             .flex_col()
             .gap_3()
-            .child(eyebrow(i18n::lookup(key, None), cx))
+            .child(eyebrow(title, cx))
             .child(
                 div()
                     .flex()
@@ -71,39 +84,39 @@ impl ToastsView {
                         let show = *show;
                         Button::new(*id)
                             .outline()
-                            .label(i18n::lookup(label, None))
+                            .label(*label)
                             .on_click(cx.listener(move |this, _, _, cx| show(this, cx)))
                     })),
             )
     }
 }
 
-impl Render for ToastsView {
+impl Render for Page {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
 
         let kinds: [Sample; 6] = [
-            ("toast-plain", "toasts-show-plain", |_, cx| {
+            ("toast-plain", "Default", |_, cx| {
                 Toasts::show(Outcome::Plain, "toast-sample-plain", cx)
             }),
-            ("toast-done", "toasts-show-done", |_, cx| {
+            ("toast-done", "Success", |_, cx| {
                 Toasts::show(Outcome::Done, "toast-sample-done", cx)
             }),
-            ("toast-info", "toasts-show-info", |_, cx| {
+            ("toast-info", "Info", |_, cx| {
                 Toasts::show(Outcome::Info, "toast-sample-info", cx)
             }),
-            ("toast-warning", "toasts-show-warning", |_, cx| {
+            ("toast-warning", "Warning", |_, cx| {
                 Toasts::show(Outcome::Warning, "toast-sample-warning", cx)
             }),
-            ("toast-failed", "toasts-show-failed", |_, cx| {
+            ("toast-failed", "Error", |_, cx| {
                 Toasts::show(Outcome::Failed, "toast-sample-failed", cx)
             }),
-            ("toast-loading", "toasts-show-loading", |_, cx| {
+            ("toast-loading", "Loading", |_, cx| {
                 Toasts::post(Toast::new(Outcome::Loading, "toast-sample-loading"), cx);
             }),
         ];
         let content: [Sample; 5] = [
-            ("toast-detail", "toasts-show-detail", |_, cx| {
+            ("toast-detail", "With description", |_, cx| {
                 Toasts::with_detail(
                     Outcome::Plain,
                     "toast-sample-event",
@@ -112,42 +125,40 @@ impl Render for ToastsView {
                     cx,
                 )
             }),
-            ("toast-action", "toasts-show-action", |_, cx| {
+            ("toast-action", "With action", |_, cx| {
                 let toast = Toast::new(Outcome::Plain, "toast-sample-event")
                     .detail(t!("toast-sample-event-detail"))
                     .action("toast-sample-undo", undo);
                 Toasts::post(toast, cx);
             }),
-            ("toast-cancel", "toasts-show-cancel", |_, cx| {
+            ("toast-cancel", "Action and cancel", |_, cx| {
                 let toast = Toast::new(Outcome::Plain, "toast-sample-delete")
                     .name(NAME)
                     .cancel("toast-sample-cancel", |_| {})
                     .action("toast-sample-undo", undo);
                 Toasts::post(toast, cx);
             }),
-            ("toast-name", "toasts-show-name", |_, cx| {
+            ("toast-name", "With a name", |_, cx| {
                 Toasts::about(Outcome::Done, "toast-sample-queued", NAME, cx)
             }),
-            ("toast-long", "toasts-show-long", |_, cx| {
+            ("toast-long", "Long message", |_, cx| {
                 Toasts::show(Outcome::Info, "toast-sample-long", cx)
             }),
         ];
         let behaviour: [Sample; 5] = [
-            ("toast-promise", "toasts-show-promise", |this, cx| {
+            ("toast-promise", "Promise that succeeds", |this, cx| {
                 this.promise(true, cx)
             }),
-            (
-                "toast-promise-failed",
-                "toasts-show-promise-failed",
-                |this, cx| this.promise(false, cx),
-            ),
-            ("toast-lasting", "toasts-show-lasting", |_, cx| {
+            ("toast-promise-failed", "Promise that fails", |this, cx| {
+                this.promise(false, cx)
+            }),
+            ("toast-lasting", "Stays until closed", |_, cx| {
                 Toasts::post(
                     Toast::new(Outcome::Info, "toast-sample-lasting").lasting(),
                     cx,
                 );
             }),
-            ("toast-burst", "toasts-show-burst", |_, cx| {
+            ("toast-burst", "Five at once", |_, cx| {
                 for number in 1..=BURST {
                     Toasts::about(
                         Outcome::Plain,
@@ -157,36 +168,61 @@ impl Render for ToastsView {
                     );
                 }
             }),
-            ("toast-clear", "toasts-clear", |_, cx| Toasts::clear(cx)),
+            ("toast-clear", "Dismiss all", |_, cx| Toasts::clear(cx)),
         ];
 
         div()
-            .id("toasts-page")
             .size_full()
-            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .font_family("Inter")
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .text_size(theme.text(Text::Body))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_6()
-                    .w_full()
-                    .p_6()
+                    .id("toasts-page")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap_2()
-                            .child(heading(t!("toasts-page-title"), cx))
+                            .gap_6()
+                            .w_full()
+                            .p_6()
                             .child(
                                 div()
-                                    .text_size(theme.text(Text::Label))
-                                    .text_color(theme.muted_foreground)
-                                    .child(t!("toasts-page-detail")),
-                            ),
-                    )
-                    .child(self.group("toasts-group-kinds", &kinds, cx))
-                    .child(self.group("toasts-group-content", &content, cx))
-                    .child(self.group("toasts-group-behaviour", &behaviour, cx)),
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(heading("Toasts", cx))
+                                    .child(
+                                        div()
+                                            .text_size(theme.text(Text::Label))
+                                            .text_color(theme.muted_foreground)
+                                            .child(
+                                                "Every kind of toast Sonora can show. Point at \
+                                                 the pile to spread it out and stop the clocks, \
+                                                 or drag a toast to the right to dismiss it.",
+                                            ),
+                                    ),
+                            )
+                            .child(self.group("Kinds", &kinds, cx))
+                            .child(self.group("Content", &content, cx))
+                            .child(self.group("Behaviour", &behaviour, cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(BAR)
+                    .flex_none()
+                    .border_t_1()
+                    .border_color(theme.table_row_border)
+                    .child(self.stack.clone()),
             )
     }
 }
@@ -194,4 +230,47 @@ impl Render for ToastsView {
 /// The sample action, which only says it ran.
 fn undo(cx: &mut App) {
     Toasts::show(Outcome::Info, "toast-sample-undone", cx);
+}
+
+fn main() {
+    gpui_platform::application()
+        .with_assets(icons::Assets)
+        .run(|cx: &mut App| {
+            cx.text_system()
+                .add_fonts(vec![Cow::Borrowed(INTER)])
+                .expect("cannot load Inter");
+
+            Theme::init(
+                Look {
+                    kind: ThemeKind::Dark,
+                    rounding: Rounding::Rounded,
+                    font: 14.,
+                    transparent: false,
+                    transparency: 0.,
+                    blur: false,
+                    blur_window: false,
+                    tint: None,
+                    tint_secondary: None,
+                },
+                &Default::default(),
+                cx,
+            );
+            router::init(Destination::Home, cx);
+
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                        None, FIRST_SIZE, cx,
+                    ))),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    window.set_rem_size(cx.theme().font_size);
+                    cx.new(Page::new)
+                },
+            )
+            .expect("cannot open the window");
+
+            cx.activate(true);
+        });
 }

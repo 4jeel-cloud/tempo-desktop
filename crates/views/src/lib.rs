@@ -4,6 +4,7 @@ mod screens;
 mod shared;
 mod shells;
 
+pub use chrome::ToastStack;
 #[cfg(target_os = "macos")]
 pub use chrome::traffic_lights;
 pub use root::Root;

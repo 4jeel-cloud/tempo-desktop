@@ -42,7 +42,7 @@ const FLICK: f32 = 0.11;
 /// The toasts above the player bar, piled with the newest in front. Pointing at the pile
 /// spreads it out and stops every toast's clock, and a toast dragged right far or fast enough
 /// is dismissed.
-pub(crate) struct ToastStack {
+pub struct ToastStack {
     toasts: Entity<Toasts>,
     slots: Vec<Slot>,
     measured: Rc<RefCell<HashMap<usize, Pixels>>>,
