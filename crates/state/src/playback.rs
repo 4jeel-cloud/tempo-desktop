@@ -1157,7 +1157,7 @@ impl Playback {
     }
 
     /// Fetches tracks for the queue on the tokio runtime and places them on arrival, with a
-    /// loading toast that turns into the result. One fetch runs at a time, and a second request
+    /// toast once they land or the fetch fails. One fetch runs at a time, and a second request
     /// while one runs is dropped before it shows anything. The tracks keep `origin` as the
     /// collection they were queued from.
     fn enqueue_from<F>(
@@ -1177,10 +1177,6 @@ impl Playback {
         let Some(client) = self.client_for(id, cx) else {
             return;
         };
-        let loading = Toasts::post(
-            Toast::new(Outcome::Loading, format!("toast-queueing-{source}")),
-            cx,
-        );
         let io = Io::global(cx);
         self.enqueue = Some(cx.spawn(async move |this, cx| {
             let loaded = join(io.spawn(async move { tracks(client).await })).await;
@@ -1189,17 +1185,13 @@ impl Playback {
                 match loaded {
                     Ok(tracks) => {
                         let queued = this.place(tracks, origin, placement, cx);
-                        match placement.toast(source).filter(|_| queued) {
-                            Some(key) => {
-                                Toasts::settle(loading, Toast::new(Outcome::Done, key), cx)
-                            }
-                            None => Toasts::close(loading, cx),
+                        if let Some(key) = placement.toast(source).filter(|_| queued) {
+                            Toasts::show(Outcome::Done, key, cx);
                         }
                     }
                     Err(error) => {
                         log::error!("playback: cannot enqueue {source}: {error:#}");
-                        let failed = Toast::new(Outcome::Failed, "toast-queue-failed");
-                        Toasts::settle(loading, failed, cx);
+                        Toasts::show(Outcome::Failed, "toast-queue-failed", cx);
                     }
                 }
             })
