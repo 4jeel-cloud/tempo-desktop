@@ -26,14 +26,31 @@ const TRUNCATED: u32 = 500;
 const TRUSTED: u32 = 25;
 
 pub fn rank(query: &LyricsQuery, hits: Vec<LyricsHit>) -> Vec<LyricsHit> {
+    rank_with_priority(query, hits, &[])
+}
+
+/// Prefers sources in `priority`, then ranks quality within each source and removes duplicates.
+/// An empty priority keeps the existing quality-first ranking.
+pub fn rank_with_priority(
+    query: &LyricsQuery,
+    hits: Vec<LyricsHit>,
+    priority: &[String],
+) -> Vec<LyricsHit> {
     let mut scored: Vec<(i64, LyricsHit)> = hits
         .into_iter()
         .filter(|hit| eligible(query, hit))
         .map(|hit| (score(query, &hit), hit))
         .collect();
     scored.sort_by(|(left_score, left), (right_score, right)| {
-        right_score
-            .cmp(left_score)
+        let position = |source: &str| {
+            priority
+                .iter()
+                .position(|name| name == source)
+                .unwrap_or(priority.len())
+        };
+        position(left.source)
+            .cmp(&position(right.source))
+            .then_with(|| right_score.cmp(left_score))
             .then_with(|| left.source.cmp(right.source))
             .then_with(|| left.title.cmp(&right.title))
     });

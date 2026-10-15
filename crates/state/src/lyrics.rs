@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use gpui::{Context, Entity, Task};
 use music::lyrics::LOCAL;
-use music::{Lyrics as Sheet, LyricsHit, LyricsProvider, LyricsQuery, Track, TrackKey};
-use tokio::task::JoinSet;
+use music::{LyricsHit, LyricsProvider, LyricsQuery, Track, TrackKey};
 
 use crate::sheets::{Sheets, Unsaved};
 use crate::{AppSettings, Io, Playback, Queue, Session, join};
@@ -19,6 +18,8 @@ pub enum LyricsState {
     Missing,
     Failed(String),
 }
+
+const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SAVE_DELAY: Duration = Duration::from_millis(800);
 
@@ -41,6 +42,7 @@ pub struct Lyrics {
     unsaved: Vec<Unsaved>,
     providers: Vec<Arc<dyn LyricsProvider>>,
     enabled_providers: Vec<String>,
+    provider_priority: Vec<String>,
     prefer_local: bool,
     playback: Entity<Playback>,
     queue: Entity<Queue>,
@@ -72,11 +74,16 @@ impl Lyrics {
             let settings = settings.read(cx);
             let enabled = settings.lyrics_providers();
             let prefer_local = settings.prefer_local_lyrics();
-            if enabled == this.enabled_providers && prefer_local == this.prefer_local {
+            let priority = settings.lyrics_provider_priority();
+            if enabled == this.enabled_providers
+                && prefer_local == this.prefer_local
+                && priority == this.provider_priority
+            {
                 return;
             }
             this.enabled_providers = enabled.to_vec();
             this.prefer_local = prefer_local;
+            this.provider_priority = priority;
             this.task = None;
             this.ahead = None;
             this.ahead_of = None;
@@ -84,11 +91,12 @@ impl Lyrics {
             this.follow(cx);
         })
         .detach();
-        let (enabled_providers, prefer_local) = {
+        let (enabled_providers, prefer_local, provider_priority) = {
             let settings = settings.read(cx);
             (
                 settings.lyrics_providers().to_vec(),
                 settings.prefer_local_lyrics(),
+                settings.lyrics_provider_priority(),
             )
         };
         let store = Sheets::new(storage::Cache::standard());
@@ -109,6 +117,7 @@ impl Lyrics {
             unsaved: Vec::new(),
             providers,
             enabled_providers,
+            provider_priority,
             prefer_local,
             playback,
             queue,
@@ -194,17 +203,17 @@ impl Lyrics {
 
     /// Puts what `found` holds from the enabled sources on screen as the settled answer.
     fn show(&mut self, found: &Found, query: &LyricsQuery, cx: &mut Context<Self>) {
-        let settings = self.settings.read(cx);
+        let sources = self.asked(self.following.as_deref().unwrap_or_default(), cx);
         let hits: Vec<LyricsHit> = found
             .hits
             .iter()
-            .filter(|hit| settings.lyrics_provider_enabled(hit.source))
+            .filter(|hit| sources.iter().any(|provider| provider.name() == hit.source))
             .cloned()
             .collect();
         let instrumental = music::lyrics::instrumental(query, &hits);
         self.task = None;
         self.settled = true;
-        self.hits = ordered(query, hits);
+        self.hits = ordered(query, hits, &self.provider_priority);
         self.state = state_for(&self.hits, instrumental);
         cx.notify();
         self.prefetch(cx);
@@ -261,15 +270,15 @@ impl Lyrics {
         let online = self.online(id, cx);
         let reads_file = self.reads_file(id, cx);
         let settings = self.settings.read(cx);
-        self.providers
-            .iter()
-            .filter(|provider| settings.lyrics_provider_enabled(provider.name()))
-            .filter(|provider| match provider.name() == LOCAL {
-                true => reads_file,
-                false => online,
-            })
-            .cloned()
-            .collect()
+        let priority = settings.lyrics_provider_priority();
+        providers_for(
+            &self.providers,
+            settings.lyrics_providers(),
+            &priority,
+            online,
+            reads_file,
+            settings.prefer_local_lyrics(),
+        )
     }
 
     fn query(&self, track: &Track, id: &str, cx: &Context<Self>) -> LyricsQuery {
@@ -352,14 +361,7 @@ impl Lyrics {
     /// the services that have not answered for this track yet are asked, and a file's own lyrics
     /// are read again on every play. What the cache holds is shown alongside the new answers.
     fn fetch(&mut self, id: String, track: Track, cx: &mut Context<Self>) -> Task<()> {
-        let settings = self.settings.read(cx);
-        let prefer_local = settings.prefer_local_lyrics();
-        let enabled: Vec<&'static str> = self
-            .providers
-            .iter()
-            .map(|provider| provider.name())
-            .filter(|name| settings.lyrics_provider_enabled(name))
-            .collect();
+        let priority = self.settings.read(cx).lyrics_provider_priority();
         let asked = self.asked(&id, cx);
         let remembered = self.recall(&id);
         let stored = remembered.is_none().then(|| self.stored(&id, cx));
@@ -376,87 +378,14 @@ impl Lyrics {
                 this.update(cx, |this, _| this.hold(id, held)).ok();
             }
             let cached = cached.unwrap_or_default();
-            let mut providers: Vec<Arc<dyn LyricsProvider>> = asked
-                .into_iter()
-                .filter(|provider| !cached.covers(provider))
-                .collect();
-            if providers.is_empty() {
-                this.update(cx, |this, cx| {
-                    if this.finished(&id) {
-                        log::debug!("lyrics: showing the stored answer");
-                        this.show(&cached, &query, cx);
-                    }
-                })
-                .ok();
-                return;
-            }
-
-            if prefer_local
-                && let Some(index) = providers
-                    .iter()
-                    .position(|provider| provider.name() == LOCAL)
-            {
-                let local = providers.remove(index);
-                let asked = query.clone();
-                let read = io.spawn(async move { local.search(&asked).await });
-                let hits = join(read).await.unwrap_or_else(|error| {
-                    log::warn!(
-                        "lyrics: cannot read the lyrics in {}: {error:#}",
-                        track.name
-                    );
-                    Vec::new()
-                });
-                if hits.iter().any(|hit| music::lyrics::eligible(&query, hit)) {
-                    let found = Found {
-                        hits,
-                        answered: Vec::new(),
-                    };
-                    this.update(cx, |this, cx| {
-                        if this.finished(&id) {
-                            this.show(&found, &query, cx);
-                        }
-                    })
-                    .ok();
-                    return;
-                }
-            }
-
-            // The cached hits from enabled sources go in first, as if they had just arrived.
-            let held: Vec<LyricsHit> = cached
-                .hits
-                .iter()
-                .filter(|hit| enabled.contains(&hit.source))
-                .cloned()
-                .collect();
+            let providers = asked;
             let (sender, mut incoming) = tokio::sync::mpsc::unbounded_channel();
-            if !held.is_empty() {
-                sender.send(held).ok();
-            }
+            let held = cached.clone();
             let ranking = query.clone();
-            let worker = io.spawn(async move { gather(providers, query, sender).await });
+            let worker = io.spawn(async move { gather(providers, query, held, sender).await });
             let mut hits = Vec::new();
-            let mut displayed: Option<LyricsHit> = None;
-            let mut shown: Option<u8> = None;
-
             while let Some(mut found) = incoming.recv().await {
                 hits.append(&mut found);
-                let ranked = ordered(&ranking, hits.clone());
-                let Some(best) = ranked.first().cloned() else {
-                    continue;
-                };
-                let step = depth(&best.lyrics);
-                if shown.is_none_or(|shown| step >= shown) {
-                    shown = Some(step);
-                    displayed = Some(best);
-                }
-                let anchor = displayed.clone();
-                this.update(cx, |this, cx| {
-                    if this.following.as_deref() != Some(id.as_str()) {
-                        return;
-                    }
-                    this.paint(ranked, anchor.as_ref(), cx);
-                })
-                .ok();
             }
 
             let answered = join(worker).await;
@@ -469,8 +398,8 @@ impl Lyrics {
                         this.keep(id, cached, &hits, answered, cx);
                         if current {
                             let instrumental = music::lyrics::instrumental(&ranking, &hits);
-                            let ranked = ordered(&ranking, hits);
-                            this.settle(ranked, displayed.as_ref(), instrumental, cx);
+                            let ranked = ordered(&ranking, hits, &priority);
+                            this.settle(ranked, instrumental, cx);
                         }
                     }
                     Err(error) => {
@@ -485,71 +414,6 @@ impl Lyrics {
             })
             .ok();
         })
-    }
-
-    /// Shows an answer that arrived while others are still being looked for.
-    ///
-    /// A word-by-word sheet is the best there is, so it goes up the moment it
-    /// turns up and settles the question rather than waiting for the slowest
-    /// source to answer. Short of that, the first timed answer is put up and
-    /// nothing replaces it until the search is over: the reader is never walked
-    /// through a series of ever better sheets, and an untimed one is not shown at
-    /// all while something better could still arrive.
-    fn paint(
-        &mut self,
-        ranked: Vec<LyricsHit>,
-        displayed: Option<&LyricsHit>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.settled {
-            return;
-        }
-        let kind = self
-            .prospect(&ranked, displayed)
-            .map(|hit| depth(&hit.lyrics));
-        let best = kind == Some(WORDED);
-        if !best && !self.hits.is_empty() {
-            return;
-        }
-        if !best && kind != Some(TIMED) {
-            return;
-        }
-        match best {
-            true => {
-                log::debug!("lyrics: settling on a word-by-word answer as it arrives");
-                self.settled = true;
-            }
-            false => log::debug!("lyrics: showing the first timed answer while the rest arrive"),
-        }
-        self.apply(ranked, displayed, cx);
-    }
-
-    fn apply(
-        &mut self,
-        ranked: Vec<LyricsHit>,
-        displayed: Option<&LyricsHit>,
-        cx: &mut Context<Self>,
-    ) {
-        self.pin(ranked, displayed);
-        if !self.hits.is_empty() {
-            self.state = LyricsState::Ready;
-        }
-        cx.notify();
-    }
-
-    /// The hit a ranking would put on screen.
-    fn prospect<'a>(
-        &'a self,
-        ranked: &'a [LyricsHit],
-        displayed: Option<&'a LyricsHit>,
-    ) -> Option<&'a LyricsHit> {
-        let anchor = match self.picked {
-            true => self.hits.get(self.chosen),
-            false => displayed,
-        };
-        anchor
-            .and_then(|anchor| ranked.iter().find(|hit| same(hit, anchor)))
-            .or_else(|| ranked.first())
     }
 
     /// Adds what the services said in this lookup to the track's answer and saves it when one of
@@ -588,19 +452,12 @@ impl Lyrics {
         self.hold(id, found);
     }
 
-    /// Puts up the answer once every source has replied. Unless a word-by-word sheet already
-    /// settled the question, this is the best there is and nothing may replace it afterwards.
-    fn settle(
-        &mut self,
-        ranked: Vec<LyricsHit>,
-        displayed: Option<&LyricsHit>,
-        instrumental: bool,
-        cx: &mut Context<Self>,
-    ) {
+    /// Shows the preferred usable answer after lookup and starts prefetching the next track.
+    fn settle(&mut self, ranked: Vec<LyricsHit>, instrumental: bool, cx: &mut Context<Self>) {
         if !self.settled {
             log::debug!("lyrics: settling on the best answer");
             self.settled = true;
-            self.pin(ranked, displayed);
+            self.pin(ranked, None);
             self.state = state_for(&self.hits, instrumental);
         }
         cx.notify();
@@ -640,18 +497,6 @@ impl Lyrics {
     }
 }
 
-/// What a sheet is worth: word-by-word beats timed, timed beats untimed.
-const WORDED: u8 = 3;
-const TIMED: u8 = 2;
-
-fn depth(lyrics: &Sheet) -> u8 {
-    match (lyrics.worded(), lyrics.synced()) {
-        (true, _) => WORDED,
-        (false, true) => TIMED,
-        (false, false) => 1,
-    }
-}
-
 fn keep_displayed_first(hits: &mut Vec<LyricsHit>, displayed: Option<&LyricsHit>) -> bool {
     let Some(index) =
         displayed.and_then(|displayed| hits.iter().position(|hit| same(hit, displayed)))
@@ -672,8 +517,39 @@ fn same(left: &LyricsHit, right: &LyricsHit) -> bool {
         && left.lyrics.worded() == right.lyrics.worded()
 }
 
-fn ordered(query: &LyricsQuery, hits: Vec<LyricsHit>) -> Vec<LyricsHit> {
-    let mut ranked = music::lyrics::rank(query, hits);
+/// Applies enablement, local-file privacy and preference order before any provider is queried.
+fn providers_for(
+    providers: &[Arc<dyn LyricsProvider>],
+    enabled: &[String],
+    priority: &[String],
+    online: bool,
+    reads_file: bool,
+    prefer_local: bool,
+) -> Vec<Arc<dyn LyricsProvider>> {
+    let mut providers: Vec<_> = providers
+        .iter()
+        .filter(|provider| enabled.iter().any(|name| name == provider.name()))
+        .filter(|provider| match provider.name() == LOCAL {
+            true => reads_file,
+            false => online,
+        })
+        .cloned()
+        .collect();
+    providers.sort_by_key(|provider| match prefer_local && provider.name() == LOCAL {
+        true => 0,
+        false => {
+            priority
+                .iter()
+                .position(|name| name == provider.name())
+                .unwrap_or(priority.len())
+                + 1
+        }
+    });
+    providers
+}
+
+fn ordered(query: &LyricsQuery, hits: Vec<LyricsHit>, priority: &[String]) -> Vec<LyricsHit> {
+    let mut ranked = music::lyrics::rank_with_priority(query, hits, priority);
     music::lyrics::reshape(&mut ranked);
     ranked
 }
@@ -712,40 +588,48 @@ fn query_for(track: &Track, key: Option<TrackKey>) -> LyricsQuery {
     }
 }
 
-/// Asks every provider at once and sends each one's hits for the queried track as they arrive.
-/// Returns the providers that replied, leaving out any that failed.
+/// Tries sources in order, reusing cached answers and stopping at the first usable lyrics.
+/// Only successful requests enter `answered`; failures and skipped sources remain retryable.
 async fn gather(
     providers: Vec<Arc<dyn LyricsProvider>>,
     query: LyricsQuery,
+    cached: Found,
     sender: tokio::sync::mpsc::UnboundedSender<Vec<LyricsHit>>,
 ) -> anyhow::Result<Vec<&'static str>> {
-    let mut tasks = JoinSet::new();
-    for provider in providers {
-        let query = query.clone();
-        tasks.spawn(async move {
-            let name = provider.name();
-            let mut found = provider
-                .search(&query)
-                .await
-                .inspect_err(|error| log::warn!("lyrics: {name} did not answer: {error:#}"))
-                .ok()?;
-            // Hits for another track are dropped here, before the lookup holds and copies them.
-            found.retain(|hit| music::lyrics::matched(&query, hit));
-            Some((name, found))
-        });
-    }
     let mut answered = Vec::new();
-    while !tasks.is_empty() {
-        tokio::select! {
-            // Dropping the foreground lookup (including on a provider change) must also
-            // stop its network requests. Dropping this JoinSet aborts the remaining tasks.
-            _ = sender.closed() => break,
-            found = tasks.join_next() => {
-                if let Some(Ok(Some((name, found)))) = found {
+    for provider in providers {
+        let name = provider.name();
+        let mut found = if cached.covers(&provider) {
+            cached
+                .hits
+                .iter()
+                .filter(|hit| hit.source == name)
+                .cloned()
+                .collect()
+        } else {
+            let result = tokio::select! {
+                _ = sender.closed() => break,
+                result = tokio::time::timeout(PROVIDER_TIMEOUT, provider.search(&query)) => result,
+            };
+            match result {
+                Ok(Ok(hits)) => {
                     answered.push(name);
-                    sender.send(found).ok();
+                    hits
+                }
+                Ok(Err(error)) => {
+                    log::warn!("lyrics: {name} did not answer: {error:#}");
+                    continue;
+                }
+                Err(_) => {
+                    log::warn!("lyrics: {name} did not answer before the timeout");
+                    continue;
                 }
             }
+        };
+        found.retain(|hit| music::lyrics::matched(&query, hit));
+        let usable = found.iter().any(|hit| music::lyrics::eligible(&query, hit));
+        if sender.send(found).is_err() || usable {
+            break;
         }
     }
     Ok(answered)
@@ -771,6 +655,317 @@ mod tests {
             duration: None,
             writers: Vec::new(),
         }
+    }
+
+    struct Provider {
+        name: &'static str,
+        hits: Vec<LyricsHit>,
+        fail: bool,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl music::LyricsProvider for Provider {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        async fn search(&self, _: &music::LyricsQuery) -> anyhow::Result<Vec<LyricsHit>> {
+            self.calls.lock().unwrap().push(self.name);
+            anyhow::ensure!(!self.fail, "provider failed");
+            Ok(self.hits.clone())
+        }
+    }
+
+    fn query() -> music::LyricsQuery {
+        music::LyricsQuery {
+            title: "title".into(),
+            artist: "artist".into(),
+            album: None,
+            duration: Duration::ZERO,
+            track: None,
+        }
+    }
+
+    fn providers(
+        cases: Vec<(&'static str, Vec<LyricsHit>, bool)>,
+        calls: &std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+    ) -> Vec<std::sync::Arc<dyn music::LyricsProvider>> {
+        cases
+            .into_iter()
+            .map(|(name, hits, fail)| {
+                std::sync::Arc::new(Provider {
+                    name,
+                    hits,
+                    fail,
+                    calls: calls.clone(),
+                }) as _
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn plain_lyrics_stop_before_a_lower_priority_provider() {
+        let calls = Default::default();
+        let sources = providers(
+            vec![
+                ("first", vec![hit("first", Sheet::plain("line"))], false),
+                ("second", vec![hit("second", Sheet::plain("other"))], false),
+            ],
+            &calls,
+        );
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let answered = super::gather(sources, query(), super::Found::default(), sender)
+            .await
+            .unwrap();
+        assert_eq!(answered, vec!["first"]);
+        assert_eq!(*calls.lock().unwrap(), vec!["first"]);
+        assert_eq!(receiver.recv().await.unwrap()[0].source, "first");
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn errors_empty_and_wrong_track_answers_fall_back_without_marking_failures() {
+        let calls = Default::default();
+        let mut wrong = hit("wrong", Sheet::plain("line"));
+        wrong.artist = "another artist".into();
+        let sources = providers(
+            vec![
+                ("error", vec![], true),
+                ("empty", vec![], false),
+                ("wrong", vec![wrong], false),
+                ("last", vec![hit("last", Sheet::plain("line"))], false),
+                ("skipped", vec![], false),
+            ],
+            &calls,
+        );
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let answered = super::gather(sources, query(), super::Found::default(), sender)
+            .await
+            .unwrap();
+        assert_eq!(answered, vec!["empty", "wrong", "last"]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["error", "empty", "wrong", "last"]
+        );
+        assert!(receiver.recv().await.unwrap().is_empty());
+        assert!(receiver.recv().await.unwrap().is_empty());
+        assert_eq!(receiver.recv().await.unwrap()[0].source, "last");
+    }
+
+    #[tokio::test]
+    async fn cached_lower_priority_hits_do_not_skip_an_unanswered_preferred_source() {
+        let calls = Default::default();
+        let sources = providers(
+            vec![
+                (
+                    "first",
+                    vec![hit("first", Sheet::plain("preferred"))],
+                    false,
+                ),
+                ("second", vec![], false),
+            ],
+            &calls,
+        );
+        let cached = super::Found {
+            hits: vec![hit("second", Sheet::plain("cached"))],
+            answered: vec!["second"],
+        };
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        super::gather(sources, query(), cached, sender)
+            .await
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec!["first"]);
+        assert_eq!(receiver.recv().await.unwrap()[0].source, "first");
+    }
+
+    #[tokio::test]
+    async fn cached_empty_answers_fall_back_to_cached_lyrics_without_network_requests() {
+        let calls = Default::default();
+        let sources = providers(
+            vec![("first", vec![], false), ("second", vec![], false)],
+            &calls,
+        );
+        let cached = super::Found {
+            hits: vec![hit("second", Sheet::plain("cached"))],
+            answered: vec!["first", "second"],
+        };
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let answered = super::gather(sources, query(), cached, sender)
+            .await
+            .unwrap();
+        assert!(answered.is_empty());
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(receiver.recv().await.unwrap().is_empty());
+        assert_eq!(receiver.recv().await.unwrap()[0].source, "second");
+    }
+
+    #[tokio::test]
+    async fn local_lyrics_are_read_again_even_when_the_cache_claims_an_answer() {
+        let calls = Default::default();
+        let sources = providers(
+            vec![(
+                music::lyrics::LOCAL,
+                vec![hit(music::lyrics::LOCAL, Sheet::plain("edited"))],
+                false,
+            )],
+            &calls,
+        );
+        let cached = super::Found {
+            hits: vec![],
+            answered: vec![music::lyrics::LOCAL],
+        };
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        super::gather(sources, query(), cached, sender)
+            .await
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec![music::lyrics::LOCAL]);
+        assert_eq!(
+            receiver.recv().await.unwrap()[0].lyrics,
+            Sheet::plain("edited")
+        );
+    }
+
+    struct Waiting {
+        started: std::sync::Arc<tokio::sync::Notify>,
+        stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct Stopped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for Stopped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl music::LyricsProvider for Waiting {
+        fn name(&self) -> &'static str {
+            "waiting"
+        }
+        async fn search(&self, _: &music::LyricsQuery) -> anyhow::Result<Vec<LyricsHit>> {
+            let _stopped = Stopped(self.stopped.clone());
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_receiver_cancels_an_in_flight_provider() {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = std::sync::Arc::new(Waiting {
+            started: started.clone(),
+            stopped: stopped.clone(),
+        });
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(super::gather(
+            vec![provider],
+            query(),
+            super::Found::default(),
+            sender,
+        ));
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .unwrap();
+        drop(receiver);
+        let answered = tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(answered.is_empty());
+        assert!(stopped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_source_times_out_and_remains_retryable() {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let calls = Default::default();
+        let mut sources: Vec<std::sync::Arc<dyn music::LyricsProvider>> =
+            vec![std::sync::Arc::new(Waiting {
+                started,
+                stopped: stopped.clone(),
+            })];
+        sources.extend(providers(
+            vec![("next", vec![hit("next", Sheet::plain("line"))], false)],
+            &calls,
+        ));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let answered = tokio::time::timeout(
+            super::PROVIDER_TIMEOUT + Duration::from_secs(2),
+            super::gather(sources, query(), super::Found::default(), sender),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(answered, vec!["next"]);
+        assert_eq!(receiver.recv().await.unwrap()[0].source, "next");
+        assert!(stopped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn lookup_order_respects_priority_enablement_and_local_privacy() {
+        let calls = Default::default();
+        let sources = providers(
+            vec![
+                ("Spotify", vec![], false),
+                ("LrcLib", vec![], false),
+                (music::lyrics::LOCAL, vec![], false),
+            ],
+            &calls,
+        );
+        let priority = vec![
+            "LrcLib".into(),
+            "Spotify".into(),
+            music::lyrics::LOCAL.into(),
+        ];
+        let names = |online, reads_file, prefer_local, enabled: &[String]| {
+            super::providers_for(
+                &sources,
+                enabled,
+                &priority,
+                online,
+                reads_file,
+                prefer_local,
+            )
+            .iter()
+            .map(|source| source.name())
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(true, false, false, &priority),
+            vec!["LrcLib", "Spotify"]
+        );
+        assert_eq!(
+            names(true, false, false, &["Spotify".into()]),
+            vec!["Spotify"]
+        );
+        assert_eq!(
+            names(false, true, false, &priority),
+            vec![music::lyrics::LOCAL]
+        );
+        assert!(names(false, false, false, &priority).is_empty());
+        assert_eq!(
+            names(true, true, true, &priority),
+            vec![music::lyrics::LOCAL, "LrcLib", "Spotify"]
+        );
+    }
+
+    #[test]
+    fn cached_provider_priority_beats_lyrics_quality_and_duplicate_text() {
+        let first = hit("first", Sheet::plain("line"));
+        let mut second = first.clone();
+        second.source = "second";
+        second.trust = 100;
+        let ranked = super::ordered(
+            &query(),
+            vec![second, first],
+            &["first".into(), "second".into()],
+        );
+        assert_eq!(ranked[0].source, "first");
+        assert_eq!(ranked.len(), 1);
     }
 
     #[test]

@@ -294,6 +294,7 @@ struct Values {
     /// off afterwards is not given it back.
     local_lyrics_offered: bool,
     lyrics_providers: Vec<String>,
+    lyrics_provider_priority: Vec<String>,
     karaoke_lyrics: bool,
     blur_lyrics: bool,
     romanized_lyrics: bool,
@@ -447,6 +448,7 @@ impl Default for Values {
             lyrics_for_local_files: true,
             prefer_local_lyrics: false,
             local_lyrics_offered: false,
+            lyrics_provider_priority: lyrics_priority(&[]),
             lyrics_providers: [
                 LOCAL,
                 "Spotify",
@@ -822,6 +824,39 @@ impl AppSettings {
 
     pub fn lyrics_providers(&self) -> &[String] {
         &self.values.lyrics_providers
+    }
+
+    /// Every known lyrics source in preference order, including disabled sources.
+    pub fn lyrics_provider_priority(&self) -> Vec<String> {
+        lyrics_priority(&self.values.lyrics_provider_priority)
+    }
+
+    /// Enabled sources in their saved preference order.
+    pub fn enabled_lyrics_provider_priority(&self) -> Vec<String> {
+        self.lyrics_provider_priority()
+            .into_iter()
+            .filter(|name| self.lyrics_provider_enabled(name))
+            .collect()
+    }
+
+    /// Moves a source one position without changing whether it is enabled.
+    pub fn move_lyrics_provider(&mut self, provider: &str, up: bool, cx: &mut Context<Self>) {
+        let mut order = self.lyrics_provider_priority();
+        if !move_lyrics_provider(&mut order, &self.values.lyrics_providers, provider, up) {
+            return;
+        }
+        self.values.lyrics_provider_priority = order;
+        self.schedule_save(cx);
+    }
+
+    /// Moves a source to the target provider's position, preserving disabled sources' slots.
+    pub fn place_lyrics_provider(&mut self, provider: &str, target: &str, cx: &mut Context<Self>) {
+        let mut order = self.lyrics_provider_priority();
+        if !place_lyrics_provider(&mut order, &self.values.lyrics_providers, provider, target) {
+            return;
+        }
+        self.values.lyrics_provider_priority = order;
+        self.schedule_save(cx);
     }
 
     pub fn lyrics_provider_enabled(&self, provider: &str) -> bool {
@@ -2463,6 +2498,81 @@ fn place(pinned: &mut Vec<Held>, slug: &str, pin: Pin, gap: Option<usize>, slugs
     true
 }
 
+/// Normalizes saved names and appends missing sources in registration order.
+fn lyrics_priority(saved: &[String]) -> Vec<String> {
+    let known = [
+        LOCAL,
+        "Spotify",
+        "YouTube Music",
+        "Apple Music",
+        "Musixmatch",
+        "LrcLib",
+        "Kugou",
+        "NetEase",
+    ];
+    let mut order = Vec::new();
+    for name in saved.iter().map(String::as_str).chain(known) {
+        if known.contains(&name) && !order.iter().any(|held| held == name) {
+            order.push(name.to_owned());
+        }
+    }
+    order
+}
+
+/// Inserts the source at the target's original visible position, shifting the intervening sources.
+fn place_lyrics_provider(
+    order: &mut [String],
+    enabled: &[String],
+    provider: &str,
+    target: &str,
+) -> bool {
+    let slots: Vec<_> = order
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| enabled.contains(name).then_some(index))
+        .collect();
+    let mut visible: Vec<_> = slots.iter().map(|index| order[*index].clone()).collect();
+    let Some(from) = visible.iter().position(|name| name == provider) else {
+        return false;
+    };
+    let Some(to) = visible.iter().position(|name| name == target) else {
+        return false;
+    };
+    if from == to {
+        return false;
+    }
+    let moved = visible.remove(from);
+    visible.insert(to, moved);
+    for (index, name) in slots.into_iter().zip(visible) {
+        order[index] = name;
+    }
+    true
+}
+
+/// Swaps neighboring enabled sources, leaving disabled sources in their saved slots.
+fn move_lyrics_provider(
+    order: &mut [String],
+    enabled: &[String],
+    provider: &str,
+    up: bool,
+) -> bool {
+    let Some(index) = order
+        .iter()
+        .position(|name| name == provider && enabled.contains(name))
+    else {
+        return false;
+    };
+    let next = match up {
+        true => (0..index)
+            .rev()
+            .find(|next| enabled.contains(&order[*next])),
+        false => (index + 1..order.len()).find(|next| enabled.contains(&order[*next])),
+    };
+    let Some(next) = next else { return false };
+    order.swap(index, next);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2470,6 +2580,144 @@ mod tests {
     use super::*;
     use crate::queue::Stub;
     use ui::PinKind;
+
+    #[test]
+    fn lyrics_priority_defaults_and_round_trips_independently_of_enablement() {
+        let mut values: Values = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            values.lyrics_provider_priority,
+            [
+                LOCAL,
+                "Spotify",
+                "YouTube Music",
+                "Apple Music",
+                "Musixmatch",
+                "LrcLib",
+                "Kugou",
+                "NetEase"
+            ]
+            .map(str::to_owned)
+        );
+        assert_eq!(
+            lyrics_priority(&values.lyrics_provider_priority),
+            lyrics_priority(&[])
+        );
+        values.lyrics_provider_priority = vec!["LrcLib".into(), "Spotify".into()];
+        values.lyrics_providers = vec!["Spotify".into()];
+        let loaded: Values =
+            serde_json::from_str(&serde_json::to_string(&values).unwrap()).unwrap();
+        assert_eq!(
+            loaded.lyrics_provider_priority,
+            values.lyrics_provider_priority
+        );
+        assert_eq!(loaded.lyrics_providers, values.lyrics_providers);
+    }
+
+    #[test]
+    fn lyrics_priority_ignores_unknown_and_duplicate_sources_and_appends_missing_ones() {
+        let order = lyrics_priority(&["LrcLib".into(), "unknown".into(), "LrcLib".into()]);
+        assert_eq!(order[0], "LrcLib");
+        assert_eq!(order.len(), 8);
+        assert!(!order.iter().any(|name| name == "unknown"));
+        assert_eq!(order.iter().filter(|name| *name == "LrcLib").count(), 1);
+    }
+
+    #[test]
+    fn moving_a_lyrics_provider_preserves_others_and_stops_at_the_edges() {
+        let mut order = lyrics_priority(&[]);
+        let enabled = order.clone();
+        assert!(!move_lyrics_provider(&mut order, &enabled, LOCAL, true));
+        assert!(!move_lyrics_provider(
+            &mut order, &enabled, "NetEase", false
+        ));
+        assert!(!move_lyrics_provider(&mut order, &enabled, "unknown", true));
+        assert!(move_lyrics_provider(&mut order, &enabled, "Spotify", true));
+        assert_eq!(&order[..2], &["Spotify", LOCAL]);
+        assert!(move_lyrics_provider(&mut order, &enabled, "Spotify", false));
+        assert_eq!(order, lyrics_priority(&[]));
+    }
+
+    #[test]
+    fn moving_enabled_sources_skips_disabled_sources_without_moving_their_slots() {
+        let mut order = vec!["Spotify".into(), "YouTube Music".into(), "LrcLib".into()];
+        let enabled = vec!["Spotify".into(), "LrcLib".into()];
+        assert!(move_lyrics_provider(&mut order, &enabled, "LrcLib", true));
+        assert_eq!(order, vec!["LrcLib", "YouTube Music", "Spotify"]);
+        assert!(!move_lyrics_provider(&mut order, &enabled, "LrcLib", true));
+        assert!(!move_lyrics_provider(
+            &mut order,
+            &enabled,
+            "YouTube Music",
+            true
+        ));
+        assert!(!move_lyrics_provider(&mut order, &[], "Spotify", true));
+        assert!(move_lyrics_provider(&mut order, &enabled, "LrcLib", false));
+        assert_eq!(order, vec!["Spotify", "YouTube Music", "LrcLib"]);
+    }
+
+    #[test]
+    fn dropping_lyrics_sources_moves_to_the_target_and_preserves_disabled_slots() {
+        let mut order = vec![
+            "Spotify".into(),
+            "YouTube Music".into(),
+            "LrcLib".into(),
+            "Apple Music".into(),
+        ];
+        let enabled = vec!["Spotify".into(), "LrcLib".into(), "Apple Music".into()];
+        assert!(place_lyrics_provider(
+            &mut order,
+            &enabled,
+            "Apple Music",
+            "Spotify"
+        ));
+        assert_eq!(
+            order,
+            vec!["Apple Music", "YouTube Music", "Spotify", "LrcLib"]
+        );
+        assert!(place_lyrics_provider(
+            &mut order,
+            &enabled,
+            "Apple Music",
+            "LrcLib"
+        ));
+        assert_eq!(
+            order,
+            vec!["Spotify", "YouTube Music", "LrcLib", "Apple Music"]
+        );
+        assert!(place_lyrics_provider(
+            &mut order, &enabled, "Spotify", "LrcLib"
+        ));
+        assert_eq!(
+            order,
+            vec!["LrcLib", "YouTube Music", "Spotify", "Apple Music"]
+        );
+        assert!(place_lyrics_provider(
+            &mut order, &enabled, "Spotify", "LrcLib"
+        ));
+        assert_eq!(
+            order,
+            vec!["Spotify", "YouTube Music", "LrcLib", "Apple Music"]
+        );
+        assert!(!place_lyrics_provider(
+            &mut order, &enabled, "LrcLib", "LrcLib"
+        ));
+        assert!(!place_lyrics_provider(
+            &mut order,
+            &enabled,
+            "YouTube Music",
+            "Spotify"
+        ));
+        assert!(!place_lyrics_provider(
+            &mut order,
+            &enabled,
+            "Spotify",
+            "YouTube Music"
+        ));
+        assert!(!place_lyrics_provider(&mut order, &[], "Spotify", "LrcLib"));
+        assert!(!place_lyrics_provider(
+            &mut order, &enabled, "Spotify", "unknown"
+        ));
+    }
 
     fn resume(provider: &str, playing: &str, position: f32) -> Resume {
         Resume {

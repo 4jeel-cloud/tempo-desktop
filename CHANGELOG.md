@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Order lyrics providers in Settings. Sonora tries enabled sources in that order and stops
+  when one has usable lyrics, including plain text. Prefer local lyrics still takes precedence.
+
 ## [0.43.0] - 2026-10-13
 
 ### Added

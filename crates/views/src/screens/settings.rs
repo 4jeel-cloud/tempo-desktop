@@ -11,8 +11,8 @@ use crate::shared::popups::{AccountPicker, CookiePrompt, SearchPopup, matches_qu
 use crate::shared::text;
 use crate::shared::veil::{Edge, veil};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, FontWeight, MouseButton,
-    MouseUpEvent, Pixels, Render, SharedString, Task, Window, div, px, relative,
+    AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, FontWeight,
+    MouseButton, MouseUpEvent, Pixels, Render, SharedString, Task, Window, div, px, relative,
 };
 use gpui::{ScrollHandle, prelude::*, svg};
 use i18n::{Language, t};
@@ -25,7 +25,7 @@ use state::{
     AppSettings, CdmState, DiscordName, Drm, Failure, FullscreenControlsAutohide, Io, Playback,
     SYSTEM_FONT, Scan, ScrobbleState, Scrobbling, Session, SessionState, Sleep, Sonora,
 };
-use ui::{ActiveTheme as _, Deck, LEADING, Scrollbar, Scroller, eyebrow, snapped};
+use ui::{ActiveTheme as _, Deck, LEADING, Scrollbar, Scroller, drop_marker, eyebrow, snapped};
 use ui::{
     Avatar, Button, Dismiss, InfoCard, Initials, Input, Look, MAX_FONT, MAX_LYRICS_SCALE,
     MAX_TRANSPARENCY, MIN_FONT, MIN_LYRICS_SCALE, MenuItem, Modal, Pace, Picker, Popovers, Radio,
@@ -33,11 +33,28 @@ use ui::{
     Theme, ThemeKind, Vacancy, VisualizerStyle,
 };
 
+const LYRICS_PROVIDERS: [(&str, &str); 8] = [
+    (music::lyrics::LOCAL, "settings-lyrics-provider-local"),
+    ("Spotify", "settings-lyrics-provider-spotify"),
+    ("YouTube Music", "settings-lyrics-provider-youtube"),
+    ("Apple Music", "settings-lyrics-provider-apple-music"),
+    ("Musixmatch", "settings-lyrics-provider-musixmatch"),
+    ("LrcLib", "settings-lyrics-provider-lrclib"),
+    ("Kugou", "settings-lyrics-provider-kugou"),
+    ("NetEase", "settings-lyrics-provider-netease"),
+];
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// How wide the settings column, the search field and the category bar grow at most.
 const WIDTH: Pixels = px(640.);
 /// How much a query found in a setting's title counts over one found in its detail.
 const TITLE_WEIGHT: u32 = 2;
+const DRAGGED_PROVIDER_OPACITY: f32 = 0.45;
+// GPUI's Windows backend does not map open/closed hands yet.
+const PROVIDER_DRAG_CURSOR: gpui::CursorStyle = match cfg!(target_os = "windows") {
+    true => gpui::CursorStyle::DragLink,
+    false => gpui::CursorStyle::ClosedHand,
+};
 /// How far the rows are blurred where they pass under the header. One blur pass serves every
 /// strip, so this is also the widest the haze gets. The renderer cuts a kernel off at 24 taps
 /// on a quarter-resolution frame, so past about 32px a wider radius only flattens the curve.
@@ -180,6 +197,8 @@ enum Slot {
     EqualizerPreset,
     EqualizerBands,
     LyricsProviders,
+    LyricsPriorityTitle,
+    LyricsPriority(usize),
     PreferLocalLyrics,
     Karaoke,
     Romanized,
@@ -295,6 +314,42 @@ const MEMBERS: [Member; 5] = [
     member!("imizgun", Role::Contributor),
 ];
 
+/// A lyrics source carried by GPUI's drag session; the saved order changes only on drop.
+#[derive(Clone)]
+struct DraggedLyricsProvider {
+    provider: String,
+    label: SharedString,
+    index: usize,
+    width: Pixels,
+}
+
+impl Render for DraggedLyricsProvider {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if cx.active_drag_cursor_style() != Some(PROVIDER_DRAG_CURSOR) {
+            cx.set_active_drag_cursor_style(PROVIDER_DRAG_CURSOR, window);
+        }
+        let theme = *cx.theme();
+        div()
+            .w(self.width)
+            .h(theme.metrics.row)
+            .flex()
+            .items_center()
+            .px_3()
+            .rounded(theme.radius)
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border)
+            .text_color(theme.foreground)
+            .text_size(theme.text(Text::Body))
+            .line_height(relative(LEADING))
+            .child(
+                div()
+                    .truncate()
+                    .child(lyrics_priority_label(self.index, self.label.clone())),
+            )
+    }
+}
+
 pub struct SettingsView {
     session: Entity<Session>,
     playback: Entity<Playback>,
@@ -304,6 +359,8 @@ pub struct SettingsView {
     search: Entity<Input>,
     /// The search field's text, trimmed. Empty means the page shows one category.
     query: String,
+    lyrics_drop_target: Option<(String, ui::Edge)>,
+    dragged_lyrics_provider: Option<String>,
     /// How tall the header floating over the page measured last, so the rows start beneath it.
     header_height: Pixels,
     /// Whether the header has measured itself at least once. Until then the height is a
@@ -412,6 +469,8 @@ impl SettingsView {
             tab: SettingsTab::General,
             search,
             query: String::new(),
+            lyrics_drop_target: None,
+            dragged_lyrics_provider: None,
             header_height: Pixels::ZERO,
             header_measured: false,
             column: None,
@@ -503,8 +562,12 @@ impl SettingsView {
         let mut slots = Vec::with_capacity(bare.len() * 2);
         let mut parted = false;
         for slot in bare {
-            let titled = matches!(slot, Slot::Title(_));
-            if parted && !titled {
+            let titled = matches!(slot, Slot::Title(_) | Slot::LyricsPriorityTitle);
+            let same_list = matches!(
+                (slots.last(), slot),
+                (Some(Slot::LyricsPriority(_)), Slot::LyricsPriority(_))
+            );
+            if parted && !titled && !same_list {
                 slots.push(Slot::Sep);
             }
             parted = !titled;
@@ -637,6 +700,15 @@ impl SettingsView {
                     slots.push(Slot::PreferLocalLyrics);
                 }
                 slots.extend([Slot::Karaoke, Slot::Romanized]);
+                slots.push(Slot::LyricsPriorityTitle);
+                slots.extend(
+                    (0..self
+                        .settings
+                        .read(cx)
+                        .enabled_lyrics_provider_priority()
+                        .len())
+                        .map(Slot::LyricsPriority),
+                );
                 slots
             }
             SettingsTab::Privacy => {
@@ -673,7 +745,7 @@ impl SettingsView {
     )]
     fn slot_meta(&self, slot: Slot, cx: &App) -> Option<(SharedString, SharedString)> {
         let meta = match slot {
-            Slot::Title(_) | Slot::Sep => return None,
+            Slot::Title(_) | Slot::LyricsPriorityTitle | Slot::Sep => return None,
             Slot::Startup => (t!("settings-startup"), t!("settings-startup-detail")),
             Slot::Entries => (t!("settings-entries"), t!("settings-entries-detail")),
             Slot::Language => (t!("settings-language"), t!("settings-language-detail")),
@@ -794,6 +866,18 @@ impl SettingsView {
                 t!("settings-lyrics-providers"),
                 t!("settings-lyrics-providers-detail"),
             ),
+            Slot::LyricsPriority(index) => {
+                let settings = self.settings.read(cx);
+                let order = settings.enabled_lyrics_provider_priority();
+                let provider = order.get(index)?;
+                (
+                    lyrics_priority_label(
+                        index,
+                        i18n::lookup(lyrics_provider_label(provider), None),
+                    ),
+                    SharedString::default(),
+                )
+            }
             Slot::PreferLocalLyrics => (
                 t!("settings-prefer-local-lyrics"),
                 t!("settings-prefer-local-lyrics-detail"),
@@ -867,7 +951,19 @@ impl SettingsView {
     fn slot_height(&self, slot: Slot, window: &Window, cx: &App) -> Pixels {
         let theme = *cx.theme();
         match slot {
-            Slot::Title(_) => snapped(theme.metrics.row, window),
+            Slot::Title(_) | Slot::LyricsPriority(_) => snapped(theme.metrics.row, window),
+            Slot::LyricsPriorityTitle => {
+                let lines = wrapped_lines(
+                    self.lyrics_priority_description(cx),
+                    theme.text(Text::Small),
+                    self.column.unwrap_or(WIDTH),
+                    window,
+                );
+                snapped(
+                    theme.metrics.row + ROW_GAP + line(&theme, Text::Small) * lines as f32,
+                    window,
+                )
+            }
             Slot::Sep => SEPARATOR_HEIGHT,
             Slot::Accounts => snapped(self.accounts_height(&theme, cx), window),
             Slot::LocalFolder => snapped(self.local_height(&theme, cx), window),
@@ -933,6 +1029,22 @@ impl SettingsView {
     /// Builds the slot's row. Asked only for the rows in view, every frame they are.
     fn slot_element(&self, slot: Slot, cx: &mut Context<Self>) -> AnyElement {
         match slot {
+            Slot::LyricsPriorityTitle => {
+                let theme = *cx.theme();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(self.slot_element(Slot::Title("settings-lyrics-priority"), cx))
+                    .child(
+                        div()
+                            .text_size(theme.text(Text::Small))
+                            .text_color(theme.muted_foreground)
+                            .line_height(relative(LEADING))
+                            .child(self.lyrics_priority_description(cx)),
+                    )
+                    .into_any_element()
+            }
             Slot::Title(key) => div()
                 .h(cx.theme().metrics.row)
                 .flex()
@@ -1001,6 +1113,7 @@ impl SettingsView {
             Slot::EqualizerPreset => self.equalizer_preset_row(cx).element,
             Slot::EqualizerBands => self.equalizer_bands_row(cx).element,
             Slot::LyricsProviders => self.lyrics_providers_row(cx).element,
+            Slot::LyricsPriority(index) => self.lyrics_priority_row(index, cx).element,
             Slot::PreferLocalLyrics => self.prefer_local_lyrics_row(cx).element,
             Slot::Karaoke => self.karaoke_lyrics_row(cx).element,
             Slot::Romanized => self.romanized_lyrics_row(cx).element,
@@ -2940,17 +3053,7 @@ impl SettingsView {
     fn lyrics_providers_row(&self, cx: &mut Context<Self>) -> Setting {
         let theme = *cx.theme();
         let settings = self.settings.read(cx);
-        let providers = [
-            (music::lyrics::LOCAL, "settings-lyrics-provider-local"),
-            ("Spotify", "settings-lyrics-provider-spotify"),
-            ("YouTube Music", "settings-lyrics-provider-youtube"),
-            ("Apple Music", "settings-lyrics-provider-apple-music"),
-            ("Musixmatch", "settings-lyrics-provider-musixmatch"),
-            ("LrcLib", "settings-lyrics-provider-lrclib"),
-            ("Kugou", "settings-lyrics-provider-kugou"),
-            ("NetEase", "settings-lyrics-provider-netease"),
-        ];
-        let count = providers
+        let count = LYRICS_PROVIDERS
             .iter()
             .filter(|(provider, _)| settings.lyrics_provider_enabled(provider))
             .count();
@@ -2960,7 +3063,7 @@ impl SettingsView {
             t!("settings-lyrics-providers-selected", count = count),
         )
         .sticky()
-        .items(providers.map(|(provider, label)| {
+        .items(LYRICS_PROVIDERS.map(|(provider, label)| {
             MenuItem::new(label, i18n::lookup(label, None))
                 .selected(settings.lyrics_provider_enabled(provider))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2977,6 +3080,153 @@ impl SettingsView {
             theme.text(Text::Small),
             picker.into_any_element(),
         )
+    }
+
+    fn lyrics_priority_description(&self, cx: &App) -> SharedString {
+        match self
+            .settings
+            .read(cx)
+            .enabled_lyrics_provider_priority()
+            .is_empty()
+        {
+            true => t!("settings-lyrics-priority-empty"),
+            false => t!("settings-lyrics-priority-detail"),
+        }
+    }
+
+    fn lyrics_priority_row(&self, index: usize, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let settings = self.settings.read(cx);
+        let order = settings.enabled_lyrics_provider_priority();
+        let provider = order[index].clone();
+        let title = i18n::lookup(lyrics_provider_label(&provider), None);
+        let mut actions = div().flex().items_center().gap_1();
+        for up in [true, false] {
+            let name = provider.clone();
+            actions = actions.child(
+                Button::new((
+                    if up {
+                        "lyrics-priority-up"
+                    } else {
+                        "lyrics-priority-down"
+                    },
+                    index,
+                ))
+                .icon(icons::path(if up {
+                    "icons/chevron-up.svg"
+                } else {
+                    "icons/chevron-down.svg"
+                }))
+                .small()
+                .tooltip(if up {
+                    "settings-lyrics-priority-up"
+                } else {
+                    "settings-lyrics-priority-down"
+                })
+                .disabled(if up {
+                    index == 0
+                } else {
+                    index + 1 == order.len()
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| {
+                        settings.move_lyrics_provider(&name, up, cx)
+                    });
+                })),
+            );
+        }
+        let target = provider.clone();
+        let edge = self
+            .lyrics_drop_target
+            .as_ref()
+            .filter(|(target, _)| target == &provider)
+            .map(|(_, edge)| *edge);
+        let dragged = DraggedLyricsProvider {
+            provider,
+            label: title.clone(),
+            index,
+            width: self.column.unwrap_or(WIDTH),
+        };
+        let view = cx.entity().downgrade();
+        let title = lyrics_priority_label(index, title);
+        let row = div()
+            .h(theme.metrics.row)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .child(div().flex_1().min_w_0().truncate().child(title.clone()))
+            .child(actions.flex_none());
+        Setting {
+            element: div()
+                .id(("lyrics-priority-row", index))
+                .relative()
+                .w_full()
+                .min_w_0()
+                .when(
+                    self.dragged_lyrics_provider.as_deref() == Some(dragged.provider.as_str()),
+                    |row| row.opacity(DRAGGED_PROVIDER_OPACITY),
+                )
+                .child(row)
+                .when(!self.searching(), |row| {
+                    row.when_else(
+                        cfg!(target_os = "windows"),
+                        |row| row.cursor_pointer(),
+                        |row| row.cursor_grab(),
+                    )
+                    .on_drag(dragged, move |dragged, _, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.lyrics_drop_target = None;
+                            this.dragged_lyrics_provider = Some(dragged.provider.clone());
+                            cx.notify();
+                        })
+                        .ok();
+                        cx.new(|_| dragged.clone())
+                    })
+                    .on_drag_move(cx.listener(
+                        move |this, event: &DragMoveEvent<DraggedLyricsProvider>, _, cx| {
+                            if !event.bounds.contains(&event.event.position) {
+                                return;
+                            }
+                            let order = this.settings.read(cx).enabled_lyrics_provider_priority();
+                            let source = order
+                                .iter()
+                                .position(|name| name == &event.drag(cx).provider);
+                            let target =
+                                source.filter(|source| *source != index).and_then(|source| {
+                                    order.get(index).cloned().map(|name| {
+                                        (
+                                            name,
+                                            if source < index {
+                                                ui::Edge::Below
+                                            } else {
+                                                ui::Edge::Above
+                                            },
+                                        )
+                                    })
+                                });
+                            if this.lyrics_drop_target != target {
+                                this.lyrics_drop_target = target;
+                                cx.notify();
+                            }
+                        },
+                    ))
+                    .on_drop(cx.listener(
+                        move |this, dragged: &DraggedLyricsProvider, _, cx| {
+                            this.lyrics_drop_target = None;
+                            this.dragged_lyrics_provider = None;
+                            this.settings.update(cx, |settings, cx| {
+                                settings.place_lyrics_provider(&dragged.provider, &target, cx)
+                            });
+                            cx.notify();
+                        },
+                    ))
+                })
+                .when_some(edge, |row, edge| row.child(drop_marker(edge, cx)))
+                .into_any_element(),
+            title,
+            detail: SharedString::default(),
+        }
     }
 
     fn prefer_local_lyrics_row(&self, cx: &mut Context<Self>) -> Setting {
@@ -4417,6 +4667,10 @@ fn open_path(path: &Path) -> std::io::Result<()> {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !cx.has_active_drag() {
+            self.lyrics_drop_target = None;
+            self.dragged_lyrics_provider = None;
+        }
         let searching = self.searching();
         // a search can list the typeface row from any category
         let in_appearance = self.tab == SettingsTab::Appearance || searching;
@@ -4779,4 +5033,20 @@ fn hertz(frequency: f32) -> SharedString {
         ),
         false => t!("settings-equalizer-hertz", hz = frequency.round() as i64),
     }
+}
+
+fn lyrics_provider_label(provider: &str) -> &'static str {
+    LYRICS_PROVIDERS
+        .iter()
+        .find(|(name, _)| *name == provider)
+        .map(|(_, label)| *label)
+        .unwrap_or("settings-lyrics-providers")
+}
+
+fn lyrics_priority_label(index: usize, provider: SharedString) -> SharedString {
+    t!(
+        "settings-lyrics-priority-item",
+        position = index + 1,
+        provider = provider.as_ref()
+    )
 }
