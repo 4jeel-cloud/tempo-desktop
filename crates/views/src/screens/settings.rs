@@ -3107,6 +3107,11 @@ impl SettingsView {
         let settings = self.settings.read(cx);
         let order = settings.enabled_lyrics_provider_priority();
         let provider = order[index].clone();
+        let local_first = settings.prefer_local_lyrics()
+            && order
+                .first()
+                .is_some_and(|name| name == music::lyrics::LOCAL);
+        let locked = local_first && provider == music::lyrics::LOCAL;
         let title = i18n::lookup(lyrics_provider_label(&provider), None);
         let mut actions = div().flex().items_center().gap_1();
         for up in [true, false] {
@@ -3132,9 +3137,9 @@ impl SettingsView {
                     "settings-lyrics-priority-down"
                 })
                 .disabled(if up {
-                    index == 0
+                    locked || index == 0 || (local_first && index == 1)
                 } else {
-                    index + 1 == order.len()
+                    locked || index + 1 == order.len()
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.settings.update(cx, |settings, cx| {
@@ -3176,7 +3181,7 @@ impl SettingsView {
                     |row| row.opacity(DRAGGED_PROVIDER_OPACITY),
                 )
                 .child(row)
-                .when(!self.searching(), |row| {
+                .when(!self.searching() && !locked, |row| {
                     row.when_else(
                         cfg!(target_os = "windows"),
                         |row| row.cursor_pointer(),
@@ -3196,7 +3201,13 @@ impl SettingsView {
                             if !event.bounds.contains(&event.event.position) {
                                 return;
                             }
-                            let order = this.settings.read(cx).enabled_lyrics_provider_priority();
+                            let settings = this.settings.read(cx);
+                            let order = settings.enabled_lyrics_provider_priority();
+                            if settings.prefer_local_lyrics()
+                                && event.drag(cx).provider == music::lyrics::LOCAL
+                            {
+                                return;
+                            }
                             let source = order
                                 .iter()
                                 .position(|name| name == &event.drag(cx).provider);
@@ -3227,6 +3238,17 @@ impl SettingsView {
                                 settings.place_lyrics_provider(&dragged.provider, &target, cx)
                             });
                             cx.notify();
+                        },
+                    ))
+                })
+                .when(locked, |row| {
+                    row.on_drag_move(cx.listener(
+                        |this, event: &DragMoveEvent<DraggedLyricsProvider>, _, cx| {
+                            if event.bounds.contains(&event.event.position)
+                                && this.lyrics_drop_target.take().is_some()
+                            {
+                                cx.notify();
+                            }
                         },
                     ))
                 })

@@ -831,18 +831,21 @@ impl AppSettings {
         lyrics_priority(&self.values.lyrics_provider_priority)
     }
 
-    /// Enabled sources in their saved preference order.
+    /// Enabled sources in lookup order. Preferring local lyrics does not rewrite the saved order.
     pub fn enabled_lyrics_provider_priority(&self) -> Vec<String> {
-        self.lyrics_provider_priority()
-            .into_iter()
-            .filter(|name| self.lyrics_provider_enabled(name))
-            .collect()
+        enabled_lyrics_priority(
+            &self.lyrics_provider_priority(),
+            &self.values.lyrics_providers,
+            self.prefer_local_lyrics(),
+        )
     }
 
     /// Moves a source one position without changing whether it is enabled.
     pub fn move_lyrics_provider(&mut self, provider: &str, up: bool, cx: &mut Context<Self>) {
         let mut order = self.lyrics_provider_priority();
-        if !move_lyrics_provider(&mut order, &self.values.lyrics_providers, provider, up) {
+        let enabled =
+            movable_lyrics_providers(&self.values.lyrics_providers, self.prefer_local_lyrics());
+        if !move_lyrics_provider(&mut order, &enabled, provider, up) {
             return;
         }
         self.values.lyrics_provider_priority = order;
@@ -852,7 +855,9 @@ impl AppSettings {
     /// Moves a source to the target provider's position, preserving disabled sources' slots.
     pub fn place_lyrics_provider(&mut self, provider: &str, target: &str, cx: &mut Context<Self>) {
         let mut order = self.lyrics_provider_priority();
-        if !place_lyrics_provider(&mut order, &self.values.lyrics_providers, provider, target) {
+        let enabled =
+            movable_lyrics_providers(&self.values.lyrics_providers, self.prefer_local_lyrics());
+        if !place_lyrics_provider(&mut order, &enabled, provider, target) {
             return;
         }
         self.values.lyrics_provider_priority = order;
@@ -2519,6 +2524,32 @@ fn lyrics_priority(saved: &[String]) -> Vec<String> {
     order
 }
 
+/// Keeps Local first only in the displayed order, leaving the stored preference untouched.
+fn enabled_lyrics_priority(
+    order: &[String],
+    enabled: &[String],
+    prefer_local: bool,
+) -> Vec<String> {
+    let mut visible: Vec<_> = order
+        .iter()
+        .filter(|name| enabled.contains(name))
+        .cloned()
+        .collect();
+    if prefer_local && let Some(index) = visible.iter().position(|name| name == LOCAL) {
+        visible[..=index].rotate_right(1);
+    }
+    visible
+}
+
+/// Local's saved slot stays fixed while its preference overrides the normal order.
+fn movable_lyrics_providers(enabled: &[String], prefer_local: bool) -> Vec<String> {
+    enabled
+        .iter()
+        .filter(|name| !prefer_local || name.as_str() != LOCAL)
+        .cloned()
+        .collect()
+}
+
 /// Inserts the source at the target's original visible position, shifting the intervening sources.
 fn place_lyrics_provider(
     order: &mut [String],
@@ -2717,6 +2748,51 @@ mod tests {
         assert!(!place_lyrics_provider(
             &mut order, &enabled, "Spotify", "unknown"
         ));
+    }
+
+    #[test]
+    fn preferring_local_pins_it_visually_without_rewriting_saved_priority() {
+        let saved = vec!["Spotify".into(), "LrcLib".into(), LOCAL.into()];
+        let enabled = saved.clone();
+        assert_eq!(
+            enabled_lyrics_priority(&saved, &enabled, true),
+            vec![LOCAL, "Spotify", "LrcLib"]
+        );
+        assert_eq!(enabled_lyrics_priority(&saved, &enabled, false), saved);
+        assert_eq!(
+            enabled_lyrics_priority(&saved, &["Spotify".into()], true),
+            vec!["Spotify"]
+        );
+        assert!(enabled_lyrics_priority(&saved, &[], true).is_empty());
+    }
+
+    #[test]
+    fn preferred_local_cannot_be_moved_or_displaced_by_arrows_or_drops() {
+        let mut saved = vec!["Spotify".into(), "LrcLib".into(), LOCAL.into()];
+        let enabled = saved.clone();
+        let movable = movable_lyrics_providers(&enabled, true);
+        assert!(!move_lyrics_provider(&mut saved, &movable, LOCAL, true));
+        assert!(!move_lyrics_provider(&mut saved, &movable, LOCAL, false));
+        assert!(!place_lyrics_provider(
+            &mut saved, &movable, LOCAL, "Spotify"
+        ));
+        assert!(!place_lyrics_provider(
+            &mut saved, &movable, "Spotify", LOCAL
+        ));
+        assert!(!move_lyrics_provider(&mut saved, &movable, "Spotify", true));
+        assert!(move_lyrics_provider(&mut saved, &movable, "LrcLib", true));
+        assert_eq!(saved, vec!["LrcLib", "Spotify", LOCAL]);
+        assert_eq!(
+            enabled_lyrics_priority(&saved, &enabled, true),
+            vec![LOCAL, "LrcLib", "Spotify"]
+        );
+        assert_eq!(enabled_lyrics_priority(&saved, &enabled, false), saved);
+        assert!(place_lyrics_provider(
+            &mut saved, &movable, "LrcLib", "Spotify"
+        ));
+        assert_eq!(saved, vec!["Spotify", "LrcLib", LOCAL]);
+        let movable = movable_lyrics_providers(&enabled, false);
+        assert!(move_lyrics_provider(&mut saved, &movable, LOCAL, true));
     }
 
     fn resume(provider: &str, playing: &str, position: f32) -> Resume {
