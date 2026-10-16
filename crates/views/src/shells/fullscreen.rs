@@ -1150,6 +1150,10 @@ impl Render for FullscreenView {
         let corner = crate::chrome::window_radius(self.settings.read(cx), cx, window);
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         let corner: Option<Pixels> = None;
+        let visualizer_tint = match ambient::shown(cx) {
+            true => theme.tint.map(|tint| theme.primary_of(tint)),
+            false => None,
+        };
 
         div()
             .id("fullscreen")
@@ -1184,6 +1188,7 @@ impl Render for FullscreenView {
                 this.child(
                     Visualizer::new(self.visualizer.levels(), visualizer_max)
                         .style_kind(style)
+                        .when_some(visualizer_tint, |this, tint| this.tint(tint))
                         .when_some(corner, |this, radius| this.corner_radius(radius))
                         .absolute()
                         .left_0()
