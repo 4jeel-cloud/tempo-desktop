@@ -1,13 +1,21 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
+use discord_rich_presence::{DiscordIpc, activity};
 use gpui::{App, AppContext as _, Context, Entity, Global, Task};
 use music::artwork::{ArtworkQuery, ArtworkSearch};
 use music::{MediaKind, MusicProvider, Track};
 use tokio::sync::watch;
 
 use crate::{AppSettings, Cover, DiscordName, Io, Playback, Session, Shelf, join};
+
+#[cfg(unix)]
+mod socket;
+
+#[cfg(not(unix))]
+use discord_rich_presence::DiscordIpcClient as Client;
+#[cfg(unix)]
+use socket::Socket as Client;
 
 const APPLICATION_ID: &str = "1547350467904806923";
 const RETRY_DELAY: Duration = Duration::from_secs(3);
@@ -326,7 +334,7 @@ enum Failure {
 }
 
 async fn run(mut receiver: watch::Receiver<Shown>) {
-    let mut client = DiscordIpcClient::new(APPLICATION_ID);
+    let mut client = Client::new(APPLICATION_ID);
     let mut shown = Shown::Off;
     let mut reported: Option<String> = None;
 
@@ -408,7 +416,7 @@ fn complain(reported: &mut Option<String>, failure: String) {
 
 /// Offers one presence to Discord, reconnecting once for a socket that has gone stale. The
 /// client connects lazily, so the first offer of a session always takes this second path.
-fn send(client: &mut DiscordIpcClient, shown: &Shown) -> Result<(), Failure> {
+fn send(client: &mut Client, shown: &Shown) -> Result<(), Failure> {
     match offer(client, shown) {
         Err(Failure::Unreachable(_)) => {
             client
@@ -420,7 +428,7 @@ fn send(client: &mut DiscordIpcClient, shown: &Shown) -> Result<(), Failure> {
     }
 }
 
-fn offer(client: &mut DiscordIpcClient, shown: &Shown) -> Result<(), Failure> {
+fn offer(client: &mut Client, shown: &Shown) -> Result<(), Failure> {
     match activity(shown) {
         Some(activity) => client.set_activity(activity),
         None => client.clear_activity(),

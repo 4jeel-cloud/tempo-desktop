@@ -43,6 +43,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Removing several playlists from your library at once no longer stops after the first one.
 - Sonora now tells you when your settings could not be saved, or when downloading, installing
   or removing Widevine fails. Both used to fail without a word.
+- Show on Discord works with Discord Canary on Linux, including the Flatpak and running it next
+  to regular Discord.
 
 ## [0.43.0] - 2026-10-13
 
