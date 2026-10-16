@@ -36,6 +36,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The minimize, maximize and close buttons on Windows 10 show their icons again instead of empty
+  boxes.
+- On Windows, dragging the title bar, double-clicking it and the maximize button work every time
+  again, including in the fullscreen player.
 - Removing several playlists from your library at once no longer stops after the first one.
 - Sonora now tells you when your settings could not be saved, or when downloading, installing
   or removing Widevine fails. Both used to fail without a word.
