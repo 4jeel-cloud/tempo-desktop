@@ -45,6 +45,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or removing Widevine fails. Both used to fail without a word.
 - Show on Discord works with Discord Canary on Linux, including the Flatpak and running it next
   to regular Discord.
+- On Linux, Sonora no longer closes on its own after playing for a while.
 
 ## [0.43.0] - 2026-10-13
 
