@@ -155,6 +155,11 @@ impl Saver {
     }
 }
 
+/// Stretches or shortens `span` by the chosen pace, for motion that sets its own length.
+pub fn paced(span: Duration) -> Duration {
+    span.mul_f32(pace().scale())
+}
+
 pub fn entrance_span() -> Duration {
     Motion::Base.span() + ENTRANCE_EXTRA
 }
@@ -256,6 +261,17 @@ pub fn mix(from: Hsla, to: Hsla, t: f32) -> Hsla {
         a: blend(from.a, to.a),
     }
     .into()
+}
+
+/// The CSS `ease` timing function, cubic-bezier(0.25, 0.1, 0.25, 1), for motion copied from
+/// the web.
+pub fn css_ease(progress: f32) -> f32 {
+    cubic_bezier(progress.clamp(0., 1.), 0.25, 0.1, 0.25, 1.)
+}
+
+/// The CSS `ease-out` timing function, cubic-bezier(0, 0, 0.58, 1).
+pub fn css_ease_out(progress: f32) -> f32 {
+    cubic_bezier(progress.clamp(0., 1.), 0., 0., 0.58, 1.)
 }
 
 pub fn ease_out_expo(progress: f32) -> f32 {

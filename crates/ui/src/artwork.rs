@@ -805,6 +805,7 @@ pub struct Artwork {
     fallback: SharedString,
     accent: bool,
     soft: bool,
+    overlay: bool,
     interactivity: Interactivity,
 }
 
@@ -817,6 +818,7 @@ impl Artwork {
             circle: false,
             radius: None,
             soft: false,
+            overlay: false,
             fallback: FALLBACK_ICON.into(),
             accent: false,
             interactivity: Interactivity::new(),
@@ -853,6 +855,13 @@ impl Artwork {
         self
     }
 
+    /// Draws nothing while the image loads or after it fails, for a cover stacked over another
+    /// that already shows, so neither the skeleton nor the placeholder hides it.
+    pub fn overlay(mut self) -> Self {
+        self.overlay = true;
+        self
+    }
+
     pub fn accent(mut self) -> Self {
         self.accent = true;
         self
@@ -881,6 +890,7 @@ impl RenderOnce for Artwork {
             fallback,
             accent,
             soft,
+            overlay,
             interactivity,
         } = self;
         let theme = *cx.theme();
@@ -897,7 +907,10 @@ impl RenderOnce for Artwork {
         };
         let placeholder = {
             let fallback = fallback.clone();
-            move || blank(size, rounded, muted, glyph, fallback.clone()).into_any_element()
+            move || match overlay {
+                true => div().size(size).into_any_element(),
+                false => blank(size, rounded, muted, glyph, fallback.clone()).into_any_element(),
+            }
         };
 
         match url {
@@ -937,11 +950,12 @@ impl RenderOnce for Artwork {
                         .size(size)
                         .object_fit(ObjectFit::Cover)
                         .rounded(rounded)
-                        .with_loading(move || {
-                            Skeleton::new()
+                        .with_loading(move || match overlay {
+                            true => div().size(size).into_any_element(),
+                            false => Skeleton::new()
                                 .size(size)
                                 .rounded(rounded)
-                                .into_any_element()
+                                .into_any_element(),
                         })
                         .with_fallback(placeholder),
                     interactivity,

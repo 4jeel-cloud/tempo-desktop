@@ -782,9 +782,7 @@ impl LibraryView {
             Kind::Playlists(ids.len()),
             move |cx| {
                 library.update(cx, |library, cx| {
-                    for id in ids {
-                        library.remove_playlist_from_library(id, cx);
-                    }
+                    library.remove_playlists_from_library(ids, cx)
                 });
                 table.update(cx, |table, cx| {
                     table.delegate_mut().clear_selection();

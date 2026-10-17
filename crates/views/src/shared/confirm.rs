@@ -202,9 +202,7 @@ impl Confirm {
             move |cx| {
                 let library = Sonora::global(cx).library.clone();
                 library.update(cx, |library, cx| {
-                    for id in ids {
-                        library.remove_playlist_from_library(id, cx);
-                    }
+                    library.remove_playlists_from_library(ids, cx)
                 });
             },
             cx,
