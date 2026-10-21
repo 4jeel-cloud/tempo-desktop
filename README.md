@@ -47,6 +47,12 @@ sudo apt install ./tempo-desktop_*_amd64.deb
 Launch **Tempo Desktop** from your app menu, or run `sonora` in a terminal. On first launch it opens
 straight into YouTube Music as a guest — no account needed. Signing in is optional, in Settings.
 
+### Windows
+
+Grab `Tempo-Desktop-Setup.exe` from
+[Releases](https://github.com/4jeel-cloud/tempo-desktop/releases) and run it. It installs per-user by
+default, so no administrator rights are needed, and puts **Tempo Desktop** in the Start menu.
+
 ### Build from source
 
 You need a Rust toolchain and, for the native window, the usual GPU and audio development
@@ -84,29 +90,31 @@ inputs.tempo.packages.${system}.sonora-src  (always built from source)
 
 ## Share a packaged build
 
-Friends install Tempo Desktop by downloading a `.deb` from the
-[Releases](https://github.com/4jeel-cloud/tempo-desktop/releases) page and running one command —
-no toolchain, no setup:
+Friends install Tempo Desktop by downloading an installer from the
+[Releases](https://github.com/4jeel-cloud/tempo-desktop/releases) page and running it — no toolchain,
+no setup. On Linux:
 
 ```sh
 sudo apt install ./tempo-desktop_*_amd64.deb
 ```
 
-Then they launch **Tempo Desktop** from the app menu. On first launch it opens straight into
-YouTube Music as a guest.
+On Windows, download and run `Tempo-Desktop-Setup.exe`. Either way they launch **Tempo Desktop**
+from the app menu or Start menu, and on first launch it opens straight into YouTube Music as a guest.
 
 ### Publishing a release
 
-Push a version tag and GitHub Actions builds the `.deb` and attaches it to the Release:
+Push a version tag and GitHub Actions builds the Linux `.deb` and the Windows installer, then
+attaches both to the Release:
 
 ```sh
 git tag tempo-v0.43.0
 git push tempo tempo-v0.43.0
 ```
 
-The [`deb` workflow](.github/workflows/deb.yml) then publishes `tempo-desktop_<version>_amd64.deb`
-and a `SHA256SUMS` file on the tag's Release. It can also be run by hand from the Actions tab. To
-build the same package locally:
+The [`package` workflow](.github/workflows/package.yml) then publishes
+`tempo-desktop_<version>_amd64.deb`,
+`Tempo-Desktop-Setup.exe` and a `SHA256SUMS` file on the tag's Release. It can also be run by hand
+from the Actions tab. To build the package locally:
 
 ```sh
 ./scripts/package-deb.sh     # writes dist/tempo-desktop_<version>_amd64.deb

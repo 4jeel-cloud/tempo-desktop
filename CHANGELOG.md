@@ -44,6 +44,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still play alongside.
 - A `scripts/package-deb.sh` script builds a Debian package, so the app can be installed with a
   single `apt install ./…deb` and launched from the app menu.
+- Every tagged release now carries a Windows installer, `Tempo-Desktop-Setup.exe`, alongside the
+  Linux `.deb`, so Windows users install Tempo Desktop with a normal setup wizard.
 
 ### Fixed
 

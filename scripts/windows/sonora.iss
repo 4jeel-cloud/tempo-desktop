@@ -1,5 +1,5 @@
-#define AppName "Sonora"
-#define AppPublisher "Sonora"
+#define AppName "Tempo Desktop"
+#define AppPublisher "Tempo Desktop"
 #define AppExeName "sonora.exe"
 #define AppVersion GetEnv("SONORA_VERSION")
 #define SourceExe GetEnv("SONORA_EXE")
