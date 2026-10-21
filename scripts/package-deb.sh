@@ -23,7 +23,9 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 echo "tempo-deb: building release binary (version $VERSION, arch $ARCH)"
-cargo build --release --package sonora
+LOCK=""
+[ -f Cargo.lock ] && LOCK="--locked"
+cargo build --release $LOCK --package sonora
 
 BIN="target/release/sonora"
 if [ ! -x "$BIN" ]; then

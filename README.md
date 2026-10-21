@@ -82,18 +82,35 @@ inputs.tempo.packages.${system}.sonora-bin  (prebuilt, x86_64-linux, aarch64-lin
 inputs.tempo.packages.${system}.sonora-src  (always built from source)
 ```
 
-## How to share a packaged build
+## Share a packaged build
 
-For friends who just want to install and play, build a `.deb` once and hand them the file:
+Friends install Tempo Desktop by downloading a `.deb` from the
+[Releases](https://github.com/4jeel-cloud/tempo-desktop/releases) page and running one command —
+no toolchain, no setup:
 
 ```sh
-./scripts/package-deb.sh
+sudo apt install ./tempo-desktop_*_amd64.deb
 ```
 
-The script builds the release binary and produces `dist/tempo-desktop_<version>_amd64.deb`. A friend
-on Debian or Ubuntu installs it with a single `apt install ./…deb` and launches it from the menu —
-no toolchain, no setup. Upload the `.deb` to
-[Releases](https://github.com/4jeel-cloud/tempo-desktop/releases) so it can be linked and downloaded.
+Then they launch **Tempo Desktop** from the app menu. On first launch it opens straight into
+YouTube Music as a guest.
+
+### Publishing a release
+
+Push a version tag and GitHub Actions builds the `.deb` and attaches it to the Release:
+
+```sh
+git tag v0.43.0
+git push tempo v0.43.0
+```
+
+The [`deb` workflow](.github/workflows/deb.yml) then publishes `tempo-desktop_<version>_amd64.deb`
+and a `SHA256SUMS` file on the tag's Release. It can also be run by hand from the Actions tab. To
+build the same package locally:
+
+```sh
+./scripts/package-deb.sh     # writes dist/tempo-desktop_<version>_amd64.deb
+```
 
 ## Translations
 
