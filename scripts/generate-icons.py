@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 
-import math
-import re
-import shutil
+"""Generate every app, tray and packaging icon from the master logo.
+
+The master is `assets/icon.png`: a square, transparent-background raster of the app mark
+with no border. Everything here is derived from it, so the logo is changed in one place.
+The mark is drawn edge to edge inside its own canvas; the platform shapes differ only in
+the mask applied to the transparent margin, never in a painted background, so no icon ever
+carries a white or black border.
+"""
+
 import struct
-import subprocess
 import sys
-import tempfile
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from PIL import Image, ImageChops, ImageDraw
+
 ROOT = Path(__file__).resolve().parent.parent
-MASTER = ROOT / "assets" / "icon.svg"
+MASTER = ROOT / "assets" / "icon.png"
 
 LINUX_SIZES = [16, 24, 32, 48, 64, 128, 256, 512]
 WINDOWS_SIZES = [16, 24, 32, 48, 64, 128, 256]
 TRAY_SIZES = [32, 64]
-TRAY_STROKE = 3.2
 
 ICNS_TYPES = [
     ("icp4", 16),
@@ -31,192 +35,81 @@ ICNS_TYPES = [
     ("ic10", 1024),
 ]
 
+# How much of a 1024 canvas the macOS squircle occupies, matching Apple's grid.
 SQUIRCLE_FILL = 824 / 1024
 SQUIRCLE_RADIUS = 185.4 / 824
-SQUIRCLE_SMOOTHING = 0.6
+# How much of a 1024 canvas the mark itself occupies on macOS, so the squircle has margin.
+MACOS_MARK = 0.72
+# The corner radius of the Windows tile, as a fraction of the side.
 WINDOWS_RADIUS = 0.1875
-
-OPTICAL_STROKE = [(16, 4.0), (24, 3.2), (32, 2.8), (48, 2.3)]
-
-
-class Master:
-    def __init__(self, path):
-        if not path.exists():
-            sys.exit(f"icons: {path} is missing")
-
-        svg = ET.parse(path).getroot()
-        ns = "{http://www.w3.org/2000/svg}"
-
-        box = svg.get("viewBox")
-        if box is None:
-            sys.exit("icons: master has no viewBox")
-
-        _, _, width, height = (float(n) for n in box.split())
-        if width != height:
-            sys.exit("icons: master viewBox is not square")
-        self.span = width
-
-        rect = svg.find(f"{ns}rect")
-        self.background = rect.get("fill") if rect is not None else "white"
-
-        self.bars = []
-        for path_el in svg.iterfind(f"{ns}path"):
-            match = re.fullmatch(
-                r"M(-?[\d.]+) (-?[\d.]+)V(-?[\d.]+)", path_el.get("d").strip()
-            )
-            if not match:
-                sys.exit(f"icons: unsupported path {path_el.get('d')!r}")
-            self.bars.append(tuple(float(n) for n in match.groups()))
-            self.foreground = path_el.get("stroke", "black")
-            self.stroke = float(path_el.get("stroke-width", 2))
-            self.cap = path_el.get("stroke-linecap", "round")
-
-        if not self.bars:
-            sys.exit("icons: master has no bars")
-
-    def glyph(self, stroke):
-        return "\n".join(
-            f'  <path d="M{x} {y0}V{y1}" stroke="{self.foreground}"'
-            f' stroke-width="{stroke:g}" stroke-linecap="{self.cap}"/>'
-            for x, y0, y1 in self.bars
-        )
+# How much of the canvas the Linux circle and Windows tile leave as transparent margin.
+ROUND_FILL = 0.86
 
 
-def stroke_for(pixels, master):
-    for limit, width in OPTICAL_STROKE:
-        if pixels <= limit:
-            return width * master.stroke / 2
-    return master.stroke
+def scaled(master, side):
+    return master.resize((side, side), Image.LANCZOS)
 
 
-def squircle(side, radius, smoothing):
-    budget = side / 2
-    reach = (1 + smoothing) * radius
-    if reach > budget:
-        smoothing = budget / radius - 1
-        reach = budget
+def contained(master, canvas, fill):
+    """The master centred in a square `canvas` at `fill` of its width, on transparency."""
+    side = max(1, round(canvas * fill))
+    mark = scaled(master, side)
+    out = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+    offset = (canvas - side) // 2
+    out.alpha_composite(mark, (offset, offset))
+    return out
 
-    arc_measure = 90 * (1 - smoothing)
-    arc = math.sin(math.radians(arc_measure / 2)) * radius * math.sqrt(2)
-    alpha = (90 - arc_measure) / 2
-    beta = 45 * smoothing
-    span = radius * math.tan(math.radians(alpha / 2))
-    c = span * math.cos(math.radians(beta))
-    d = c * math.tan(math.radians(beta))
-    b = (reach - arc - c - d) / 3
-    a = 2 * b
-    ab = a + b
-    long = a + b + c
-    mid = b + c
 
-    def n(value):
-        return f"{value:.4f}"
+def in_circle(master, canvas, fill):
+    """The mark inside a transparent circle, its glyph cropped to the circle."""
+    side = max(1, round(canvas * fill))
+    mark = scaled(master, side)
+    mask = Image.new("L", (side, side), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, side - 1, side - 1), fill=255)
+    mark.putalpha(ImageChops.multiply(mark.getchannel("A"), mask))
+    out = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+    offset = (canvas - side) // 2
+    out.alpha_composite(mark, (offset, offset))
+    return out
 
-    return " ".join(
-        [
-            f"M{n(side - reach)} 0",
-            f"c{n(a)} 0 {n(ab)} 0 {n(long)} {n(d)}",
-            f"a{n(radius)} {n(radius)} 0 0 1 {n(arc)} {n(arc)}",
-            f"c{n(d)} {n(c)} {n(d)} {n(mid)} {n(d)} {n(long)}",
-            f"L{n(side)} {n(side - reach)}",
-            f"c0 {n(a)} 0 {n(ab)} {n(-d)} {n(long)}",
-            f"a{n(radius)} {n(radius)} 0 0 1 {n(-arc)} {n(arc)}",
-            f"c{n(-c)} {n(d)} {n(-mid)} {n(d)} {n(-long)} {n(d)}",
-            f"L{n(reach)} {n(side)}",
-            f"c{n(-a)} 0 {n(-ab)} 0 {n(-long)} {n(-d)}",
-            f"a{n(radius)} {n(radius)} 0 0 1 {n(-arc)} {n(-arc)}",
-            f"c{n(-d)} {n(-c)} {n(-d)} {n(-mid)} {n(-d)} {n(-long)}",
-            f"L0 {n(reach)}",
-            f"c0 {n(-a)} 0 {n(-ab)} {n(d)} {n(-long)}",
-            f"a{n(radius)} {n(radius)} 0 0 1 {n(arc)} {n(-arc)}",
-            f"c{n(c)} {n(-d)} {n(mid)} {n(-d)} {n(long)} {n(-d)}",
-            "Z",
-        ]
+
+def in_rounded(master, canvas, fill, radius):
+    """The mark inside a transparent rounded square, its glyph cropped to the tile."""
+    side = max(1, round(canvas * fill))
+    mark = scaled(master, side)
+    mask = Image.new("L", (side, side), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, side - 1, side - 1), radius=round(side * radius), fill=255
     )
+    mark.putalpha(ImageChops.multiply(mark.getchannel("A"), mask))
+    out = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+    offset = (canvas - side) // 2
+    out.alpha_composite(mark, (offset, offset))
+    return out
 
 
-def round_svg(master, pixels):
-    half = master.span / 2
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{master.span:g}"'
-        f' height="{master.span:g}" viewBox="0 0 {master.span:g} {master.span:g}">\n'
-        f'  <circle cx="{half:g}" cy="{half:g}" r="{half:g}"'
-        f' fill="{master.background}"/>\n'
-        f"{master.glyph(stroke_for(pixels, master))}\n"
-        f"</svg>\n"
-    )
+def macos_tile(master, side):
+    """The macOS icon: the mark inside Apple's squircle, on transparency between them."""
+    tile = in_rounded(master, side, SQUIRCLE_FILL, SQUIRCLE_RADIUS)
+    # The mark sits well inside the squircle, so the tile reads as an icon with padding.
+    glyph = contained(master, side, MACOS_MARK)
+    return Image.alpha_composite(tile, glyph)
 
 
-def squircle_svg(master, pixels):
-    canvas = 1024.0
-    side = canvas * SQUIRCLE_FILL
-    inset = (canvas - side) / 2
-    scale = side / master.span
-    path = squircle(side, side * SQUIRCLE_RADIUS, SQUIRCLE_SMOOTHING)
-    glyph = master.glyph(stroke_for(pixels * SQUIRCLE_FILL, master))
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas:g}"'
-        f' height="{canvas:g}" viewBox="0 0 {canvas:g} {canvas:g}">\n'
-        f'  <g transform="translate({inset:g} {inset:g})">\n'
-        f'    <path d="{path}" fill="{master.background}"/>\n'
-        f'    <g transform="scale({scale:g})">\n'
-        f"{glyph}\n"
-        f"    </g>\n"
-        f"  </g>\n"
-        f"</svg>\n"
-    )
+def white_silhouette(master, side):
+    """The tray glyph: the mark's shape in white, with the master's own alpha as the shape."""
+    mark = scaled(master, side)
+    silhouette = Image.new("RGBA", (side, side), (255, 255, 255, 0))
+    silhouette.putalpha(mark.getchannel("A"))
+    return silhouette
 
 
-def readme_svg(master):
-    """Draws the squircle edge to edge in the master's own viewBox, without the macOS margin."""
-    path = squircle(master.span, master.span * SQUIRCLE_RADIUS, SQUIRCLE_SMOOTHING)
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{master.span:g}"'
-        f' height="{master.span:g}" viewBox="0 0 {master.span:g} {master.span:g}">\n'
-        f'  <path d="{path}" fill="{master.background}"/>\n'
-        f"{master.glyph(master.stroke)}\n"
-        f"</svg>\n"
-    )
+def png_bytes(image):
+    import io
 
-
-def template_svg(master):
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{master.span:g}"'
-        f' height="{master.span:g}" viewBox="0 0 {master.span:g} {master.span:g}">\n'
-        f"{master.glyph(TRAY_STROKE)}\n"
-        f"</svg>\n"
-    )
-
-
-def rounded_svg(master, pixels):
-    radius = master.span * WINDOWS_RADIUS
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{master.span:g}"'
-        f' height="{master.span:g}" viewBox="0 0 {master.span:g} {master.span:g}">\n'
-        f'  <rect width="{master.span:g}" height="{master.span:g}"'
-        f' rx="{radius:g}" ry="{radius:g}" fill="{master.background}"/>\n'
-        f"{master.glyph(stroke_for(pixels, master))}\n"
-        f"</svg>\n"
-    )
-
-
-def rasterize(svg_text, pixels, workdir, name):
-    source = workdir / f"{name}.svg"
-    target = workdir / f"{name}.png"
-    source.write_text(svg_text, encoding="utf-8")
-    subprocess.run(
-        [
-            "rsvg-convert",
-            "--width", str(pixels),
-            "--height", str(pixels),
-            "--keep-aspect-ratio",
-            "--background-color", "none",
-            "--output", str(target),
-            str(source),
-        ],
-        check=True,
-    )
-    return target.read_bytes()
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def write_ico(entries, path):
@@ -248,67 +141,77 @@ def write_icns(entries, path):
     path.write_bytes(b"icns" + struct.pack(">I", len(body) + 8) + body)
 
 
-def main():
-    if not shutil.which("rsvg-convert"):
-        sys.exit("icons: rsvg-convert missing, run under `nix shell nixpkgs#librsvg`")
+def write_readme_svg(master):
+    """The README header mark, embedded as a base64 PNG so it reads as the logo does."""
+    import base64
 
-    master = Master(MASTER)
+    side = 128
+    blob = png_bytes(contained(master, side, 1.0))
+    encoded = base64.b64encode(blob).decode("ascii")
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60"'
+        f' viewBox="0 0 {side} {side}">\n'
+        f'  <image width="{side}" height="{side}"'
+        f' href="data:image/png;base64,{encoded}"/>\n'
+        f"</svg>\n"
+    )
+
+
+def main():
+    if not MASTER.exists():
+        sys.exit(f"icons: {MASTER} is missing")
+
+    master = Image.open(MASTER).convert("RGBA")
+    if master.width != master.height:
+        sys.exit("icons: master is not square")
+    if master.getbbox() is None:
+        sys.exit("icons: master is fully transparent")
+
     assets = ROOT / "assets"
 
-    with tempfile.TemporaryDirectory() as tmp:
-        workdir = Path(tmp)
+    assets.joinpath("linux", "sonora.svg").write_text(
+        write_readme_svg(master), encoding="utf-8"
+    )
+    (ROOT / ".github" / "readme-icon.svg").write_text(
+        write_readme_svg(master), encoding="utf-8"
+    )
 
-        scalable = assets / "linux" / "sonora.svg"
-        scalable.parent.mkdir(parents=True, exist_ok=True)
-        scalable.write_text(round_svg(master, 512), encoding="utf-8")
-
-        (ROOT / ".github" / "readme-icon.svg").write_text(
-            readme_svg(master), encoding="utf-8"
+    for pixels in LINUX_SIZES:
+        target = (
+            assets
+            / "linux"
+            / "icons"
+            / "hicolor"
+            / f"{pixels}x{pixels}"
+            / "apps"
+            / "sonora.png"
         )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(png_bytes(in_circle(master, pixels, ROUND_FILL)))
 
-        for pixels in LINUX_SIZES:
-            blob = rasterize(round_svg(master, pixels), pixels, workdir, f"l{pixels}")
-            target = (
-                assets
-                / "linux"
-                / "icons"
-                / "hicolor"
-                / f"{pixels}x{pixels}"
-                / "apps"
-                / "sonora.png"
-            )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(blob)
+    icns = []
+    rendered = {}
+    for kind, pixels in ICNS_TYPES:
+        if pixels not in rendered:
+            rendered[pixels] = png_bytes(macos_tile(master, pixels))
+        icns.append((kind, rendered[pixels]))
+    write_icns(icns, assets / "macos" / "sonora.icns")
 
-        icns = []
-        rendered = {}
-        for kind, pixels in ICNS_TYPES:
-            if pixels not in rendered:
-                rendered[pixels] = rasterize(
-                    squircle_svg(master, pixels), pixels, workdir, f"m{pixels}"
-                )
-            icns.append((kind, rendered[pixels]))
-        write_icns(icns, assets / "macos" / "sonora.icns")
+    ico = [
+        (pixels, png_bytes(in_rounded(master, pixels, ROUND_FILL, WINDOWS_RADIUS)))
+        for pixels in WINDOWS_SIZES
+    ]
+    windows = assets / "windows"
+    windows.mkdir(parents=True, exist_ok=True)
+    write_ico(ico, windows / "sonora.ico")
 
-        ico = [
-            (
-                pixels,
-                rasterize(rounded_svg(master, pixels), pixels, workdir, f"w{pixels}"),
-            )
-            for pixels in WINDOWS_SIZES
-        ]
-        windows = assets / "windows"
-        windows.mkdir(parents=True, exist_ok=True)
-        write_ico(ico, windows / "sonora.ico")
-
-        tray = assets / "tray"
-        tray.mkdir(parents=True, exist_ok=True)
-        for pixels in TRAY_SIZES:
-            blob = rasterize(template_svg(master), pixels, workdir, f"t{pixels}")
-            (tray / f"template-{pixels}.png").write_bytes(blob)
-        (tray / "sonora.png").write_bytes(
-            rasterize(round_svg(master, 32), 32, workdir, "tray")
+    tray = assets / "tray"
+    tray.mkdir(parents=True, exist_ok=True)
+    for pixels in TRAY_SIZES:
+        (tray / f"template-{pixels}.png").write_bytes(
+            png_bytes(white_silhouette(master, pixels))
         )
+    (tray / "sonora.png").write_bytes(png_bytes(in_circle(master, 32, ROUND_FILL)))
 
     print(
         f"icons: {len(LINUX_SIZES)} linux png, 1 linux svg, 1 icns, 1 ico,"

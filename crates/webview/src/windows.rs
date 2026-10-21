@@ -226,7 +226,7 @@ fn begin_controller(
         .context("the installed WebView2 runtime does not support private profiles")?;
     let options = unsafe { environment.CreateCoreWebView2ControllerOptions() }
         .context("cannot configure the private sign-in profile")?;
-    unsafe { options.SetProfileName(w!("Sonora Sign-In")) }
+    unsafe { options.SetProfileName(w!("Tempo Desktop Sign-In")) }
         .context("cannot name the sign-in profile")?;
     unsafe { options.SetIsInPrivateModeEnabled(true) }
         .context("cannot make the sign-in profile private")?;

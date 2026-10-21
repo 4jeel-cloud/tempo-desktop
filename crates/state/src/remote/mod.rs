@@ -21,7 +21,7 @@ use self::souvlaki::Controls;
 use mpris::Controls;
 
 const BUS_NAME: &str = "sonora";
-const DISPLAY_NAME: &str = "Sonora";
+const DISPLAY_NAME: &str = "Tempo Desktop";
 /// How far the position may stray from where steady playback would have put it before the
 /// widget is told the track was seeked.
 const SEEK_SLACK: Duration = Duration::from_secs(2);

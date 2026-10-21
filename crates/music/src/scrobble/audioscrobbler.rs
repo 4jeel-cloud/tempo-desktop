@@ -20,7 +20,7 @@ const WAIT: Duration = Duration::from_secs(300);
 const LASTFM_BATCH: usize = 50;
 
 const PAGE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-    <html><body>Sonora is connected. You can close this window.</body></html>";
+    <html><body>Tempo Desktop is connected. You can close this window.</body></html>";
 
 /// Libre.fm issues no API accounts, so the key and secret its protocol still asks for are ours
 /// and constant.

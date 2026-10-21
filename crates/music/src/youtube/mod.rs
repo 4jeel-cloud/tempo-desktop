@@ -324,6 +324,8 @@ impl MusicProvider for YouTubeProvider {
         matches!(self.saved(), Some(Saved::Guest))
     }
 
+    /// The stored session: the cookie account if there is one, otherwise a guest session.
+    /// A first launch has nothing stored and becomes a guest, so sign-in is always optional.
     async fn restore(&self) -> Result<Option<ProviderSession>> {
         match self.saved() {
             Some(Saved::Cookies {
@@ -338,7 +340,11 @@ impl MusicProvider for YouTubeProvider {
                 log::debug!("youtube: restoring guest session");
                 Ok(Some(self.guest_session(self.guest_client())))
             }
-            None => Ok(None),
+            None => {
+                log::debug!("youtube: no stored session, starting as guest");
+                self.store_guest();
+                Ok(Some(self.guest_session(self.guest_client())))
+            }
         }
     }
 

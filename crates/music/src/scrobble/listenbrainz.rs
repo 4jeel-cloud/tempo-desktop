@@ -11,7 +11,7 @@ const API: &str = "https://api.listenbrainz.org";
 const SETTINGS: &str = "https://listenbrainz.org/settings/";
 /// How many listens the endpoint takes in one call.
 const BATCH: usize = 50;
-const CLIENT: &str = "Sonora";
+const CLIENT: &str = "Tempo Desktop";
 
 pub struct ListenBrainz;
 

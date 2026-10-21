@@ -260,16 +260,7 @@ const DEFAULT_STARTUP: &str = "home";
 pub const SYSTEM_FONT: &str = "auto";
 /// Every lyrics source Sonora knows by the name its provider reports, in the order a fresh
 /// install prefers them.
-pub const LYRICS_SOURCES: [&str; 8] = [
-    LOCAL,
-    "Spotify",
-    "YouTube Music",
-    "Apple Music",
-    "Musixmatch",
-    "LrcLib",
-    "Kugou",
-    "NetEase",
-];
+pub const LYRICS_SOURCES: [&str; 2] = [LOCAL, "YouTube Music"];
 
 /// A pin together with the provider it belongs to. The pin is flattened so the stored JSON
 /// reads as a pin with one extra `slug` key.
@@ -462,11 +453,7 @@ impl Default for Values {
             lyrics_for_local_files: true,
             local_lyrics_offered: false,
             lyrics_provider_priority: lyrics_priority(&[]),
-            // Kugou and NetEase, the last two, start switched off.
-            lyrics_providers: LYRICS_SOURCES[..6]
-                .iter()
-                .map(|name| name.to_string())
-                .collect(),
+            lyrics_providers: LYRICS_SOURCES.iter().map(|name| name.to_string()).collect(),
             karaoke_lyrics: true,
             blur_lyrics: true,
             romanized_lyrics: true,
@@ -541,7 +528,7 @@ impl Default for StateValues {
             shuffle: false,
             repeat: Repeat::Off,
             radio: false,
-            provider: "spotify".to_owned(),
+            provider: "youtube".to_owned(),
             tables: HashMap::new(),
             sorting: HashMap::new(),
             filters: HashMap::new(),
@@ -2619,17 +2606,7 @@ mod tests {
         let mut values: Values = serde_json::from_str("{}").unwrap();
         assert_eq!(
             values.lyrics_provider_priority,
-            [
-                LOCAL,
-                "Spotify",
-                "YouTube Music",
-                "Apple Music",
-                "Musixmatch",
-                "LrcLib",
-                "Kugou",
-                "NetEase"
-            ]
-            .map(str::to_owned)
+            [LOCAL, "YouTube Music"].map(str::to_owned)
         );
         assert_eq!(
             lyrics_priority(&values.lyrics_provider_priority),
@@ -2648,11 +2625,18 @@ mod tests {
 
     #[test]
     fn lyrics_priority_ignores_unknown_and_duplicate_sources_and_appends_missing_ones() {
-        let order = lyrics_priority(&["LrcLib".into(), "unknown".into(), "LrcLib".into()]);
-        assert_eq!(order[0], "LrcLib");
-        assert_eq!(order.len(), 8);
+        let order = lyrics_priority(&[
+            "YouTube Music".into(),
+            "unknown".into(),
+            "YouTube Music".into(),
+        ]);
+        assert_eq!(order[0], "YouTube Music");
+        assert_eq!(order.len(), 2);
         assert!(!order.iter().any(|name| name == "unknown"));
-        assert_eq!(order.iter().filter(|name| *name == "LrcLib").count(), 1);
+        assert_eq!(
+            order.iter().filter(|name| *name == "YouTube Music").count(),
+            1
+        );
     }
 
     #[test]
@@ -2664,9 +2648,19 @@ mod tests {
             &mut order, &enabled, "NetEase", false
         ));
         assert!(!move_lyrics_provider(&mut order, &enabled, "unknown", true));
-        assert!(move_lyrics_provider(&mut order, &enabled, "Spotify", true));
-        assert_eq!(&order[..2], &["Spotify", LOCAL]);
-        assert!(move_lyrics_provider(&mut order, &enabled, "Spotify", false));
+        assert!(move_lyrics_provider(
+            &mut order,
+            &enabled,
+            "YouTube Music",
+            true
+        ));
+        assert_eq!(&order[..2], &["YouTube Music", LOCAL]);
+        assert!(move_lyrics_provider(
+            &mut order,
+            &enabled,
+            "YouTube Music",
+            false
+        ));
         assert_eq!(order, lyrics_priority(&[]));
     }
 

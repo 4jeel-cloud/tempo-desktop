@@ -157,7 +157,7 @@ fn authorize(client_id: &str, redirect_uri: &str, prompt: PromptSink) -> Result<
     let query = callback
         .query_pairs()
         .collect::<std::collections::HashMap<_, _>>();
-    let response = "You can return to Sonora.";
+    let response = "You can return to Tempo Desktop.";
     write!(
         stream,
         "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{response}",

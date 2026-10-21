@@ -150,9 +150,17 @@ impl Session {
     ) -> Self {
         let remembered = settings.read(cx).provider().to_string();
         let local_folders = settings.read(cx).local_folders().to_vec();
+        // A remembered slug may name a provider this build no longer ships, so fall back to
+        // YouTube rather than leaving the session with nothing to restore.
         let active = providers
             .iter()
-            .position(|provider| provider.slug() == remembered);
+            .position(|provider| provider.slug() == remembered)
+            .or_else(|| {
+                providers
+                    .iter()
+                    .position(|provider| provider.slug() == "youtube")
+            })
+            .or_else(|| (!providers.is_empty()).then_some(0));
         let local_playback = local_provider.playback_factory();
         let mut session = Self {
             state: SessionState::SignedOut,

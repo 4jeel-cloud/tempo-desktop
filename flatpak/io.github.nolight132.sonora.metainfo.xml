@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.nolight132.sonora</id>
 
-  <name>Sonora</name>
+  <name>Tempo Desktop</name>
   <developer id="io.github.nolight132">
     <name>nolight132</name>
   </developer>
@@ -26,7 +26,7 @@
 
   <description>
     <p>
-      Sonora streams Spotify and YouTube Music and plays your local files from one native
+      Tempo Desktop streams YouTube Music and plays your local files from one native
       desktop app built with Rust and GPUI, with lyrics, artist pages, playlists, and
       system media controls.
     </p>

@@ -99,13 +99,8 @@ fn main() {
         }
 
         let database = storage::Database::standard();
-        let providers: Vec<Arc<dyn music::MusicProvider>> = vec![
-            Arc::new(music::spotify::SpotifyProvider::from_env()),
-            Arc::new(music::apple::AppleProvider::new()),
-            Arc::new(music::youtube::YouTubeProvider::new()),
-            Arc::new(music::subsonic::SubsonicProvider::new()),
-            Arc::new(music::deezer::DeezerProvider::new()),
-        ];
+        let providers: Vec<Arc<dyn music::MusicProvider>> =
+            vec![Arc::new(music::youtube::YouTubeProvider::new())];
         let local_provider: Arc<dyn music::MusicProvider> =
             Arc::new(music::local::LocalProvider::new(
                 dirs::cache_dir()
@@ -116,13 +111,7 @@ fn main() {
             ));
         let lyrics: Vec<Arc<dyn LyricsProvider>> = vec![
             Arc::new(music::local::LocalLyrics),
-            Arc::new(music::spotify::SpotifyLyrics::from_env()),
             Arc::new(music::youtube::YouTubeLyrics::new()),
-            Arc::new(music::binimum::Binimum::new()),
-            Arc::new(music::musixmatch::Musixmatch::new()),
-            Arc::new(music::lrclib::LrcLib::new()),
-            Arc::new(music::kugou::Kugou::new()),
-            Arc::new(music::netease::NetEase::new()),
         ];
         state::init(cx, io, database, providers, local_provider, lyrics);
         #[cfg(target_os = "windows")]
@@ -351,7 +340,7 @@ fn open_window(cx: &mut App) {
             display_id,
             window_background: background,
             titlebar: Some(TitlebarOptions {
-                title: Some("Sonora".into()),
+                title: Some("Tempo Desktop".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(traffic_lights),
             }),

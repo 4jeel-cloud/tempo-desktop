@@ -539,7 +539,7 @@ fn buttons(
     }
     if settings.discord_sonora_button() {
         buttons.push(Button {
-            label: "Get Sonora".to_string(),
+            label: "Get Tempo Desktop".to_string(),
             url: SONORA_URL.to_string(),
         });
     }

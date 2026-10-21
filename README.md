@@ -1,202 +1,99 @@
 <div align="center">
 
-<img src="./.github/readme-icon.svg" alt="" width="60" height="60">
+<img src="./.github/readme-icon.svg" alt="Tempo Desktop" width="96" height="96">
 
-<h1>Sonora</h1>
-
-<p align="center">
-  <a href="https://sonorahq.org/changelog">Changelog</a>
-  ·
-  <a href="https://sonorahq.org/docs">Docs</a>
-  ·
-  <a href="https://sonorahq.org/docs/roadmap">Roadmap</a>
-  ·
-  <a href="https://sonorahq.org/faq">FAQ</a>
-</p>
-
-[![Build](https://img.shields.io/github/actions/workflow/status/sonorahq/sonora/release.yml?style=flat-square&label=build)](https://github.com/sonorahq/sonora/actions/workflows/release.yml)
-[![License](https://img.shields.io/github/license/sonorahq/sonora?style=flat-square&label=license&cacheSeconds=3600)](./COPYING)
-![Installs](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fsonora-stats.nolight.dev%2Fcount&query=%24.count&label=Installs&color=blue&style=flat-square)
-\
-[![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/a8N8Tx23rV)
-[![Matrix](https://img.shields.io/badge/Matrix-000000?style=for-the-badge&logo=matrix&logoColor=white)](https://matrix.to/#/#sonora:nolight.dev)
+<h1>Tempo Desktop</h1>
 
 ### A native music streaming client, built with Rust and GPUI
 
-Stream from your favorite services and play local files — all in one **native** app.
+Stream from YouTube Music and play your local files — all in one **native** app.
 </div>
 
-<div align="center">
-    <table>
-      <tr>
-        <td colspan="2">
-          <img width="1613" height="981" alt="image" src="https://github.com/user-attachments/assets/7952a912-7fbc-4186-b467-a08dd7e71e22" />
-        </td>
-      </tr>
-      <tr>
-        <td width="50%">
-          <img width="1623" height="987" alt="image" src="https://github.com/user-attachments/assets/580bf9d6-db85-4fde-b599-82ba2a28cc51" />
-        </td>
-        <td width="50%">
-          <img width="1623" height="987" alt="image" src="https://github.com/user-attachments/assets/64fcd709-5917-432c-a418-2e07527343d2" />
-        </td>
-      </tr>
-    </table>
-</div>
-<div align="center">
-    <sub>
-      Adaptive themes are optional. Everything is (or will be) customizable.
-    </sub>
-</div>
+> [!NOTE]
+> **Tempo Desktop is a personal, unofficial fork of [Sonora](https://github.com/sonorahq/sonora),
+> rebranded and narrowed to YouTube Music.** It keeps the original GPL-3.0 license and credits the
+> upstream project for the vast majority of the application. If you want Spotify, Apple Music,
+> Deezer or Subsonic support, use upstream Sonora.
 
 > [!IMPORTANT]
-> **Sonora is not a piracy tool.**
+> **Tempo Desktop is not a piracy tool.**
 >
-> Sonora is not a platform for obtaining or sharing copyrighted material. We will not implement any functions that can be used to export decrypted streams, DRM licenses, content keys, or to convert protected streams into media files.
->
-> Sonora is not designed to circumvent subscriptions or other restrictions put in place by music streaming platforms. If the service demands that you have a valid subscription in order to play back their tracks, so will Sonora.
->
-> Features aimed at ripping, downloading, distributing, or gaining access to protected streaming content are out of scope for the project.
+> It is not a platform for obtaining or sharing copyrighted material, it does not export decrypted
+> streams, DRM licenses or content keys, and it does not circumvent subscriptions or other
+> restrictions put in place by music streaming platforms. If a service requires a valid
+> subscription to play a track, so does Tempo Desktop.
 
 ## Features
 
-- **Apple Music, Spotify, YouTube Music, Deezer, Subsonic/Navidrome** and local playback
+- **YouTube Music** playback, signed in or as a guest, plus **local file** playback
 - Gapless playback, audio normalization, shuffle, sleep timer
 - Synced/karaoke lyrics, background vocals, and romanization
 - Scrobbling with LastFM, ListenBrainz, LibreFM, and Maloja
 - Themes, fonts, icons, transparency, blur, and window styling
 - Discord Rich Presence, native file opening
-- macOS, Windows, Linux, and (probably) FreeBSD support
+- macOS, Windows, and Linux support
 
-## Installation
+## Install
 
-### macOS
+### Debian / Ubuntu (preset, no setup)
 
-Install with [Brew](https://brew.sh/):
-
-```sh
-brew install --cask nolight132/tap/sonora
-```
-
-After installing (thanks Apple):
+Grab the `.deb` from [Releases](https://github.com/4jeel-cloud/tempo-desktop/releases) and install
+it. Everything the app needs is pulled in as a dependency:
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/Sonora.app
+sudo apt install ./tempo-desktop_*_amd64.deb
 ```
 
-### Linux
+Launch **Tempo Desktop** from your app menu, or run `sonora` in a terminal. On first launch it opens
+straight into YouTube Music as a guest — no account needed. Signing in is optional, in Settings.
 
-#### Arch
+### Build from source
 
-Install from the AUR with your AUR helper of choice:
+You need a Rust toolchain and, for the native window, the usual GPU and audio development
+libraries. The project is a Cargo workspace.
 
 ```sh
-yay -S sonora-bin
+git clone https://github.com/4jeel-cloud/tempo-desktop.git
+cd tempo-desktop
+nix develop            # recommended: brings every build dependency; or set up your own
+cargo run --locked --package sonora
 ```
 
-`sonora-bin` installs the prebuilt release binary. `sonora` builds the same version from source
-instead, which takes a while on a Rust and GPUI tree but links against your own system libraries:
+To produce and run an optimized binary on any Linux distro:
 
 ```sh
-yay -S sonora
+cargo build --release --package sonora
+./target/release/sonora
 ```
 
-Either `pipewire-alsa` or `pulseaudio-alsa` is required, matching your sound server. Sonora
-warns you at startup when the one your sound server needs is missing.
+`.cargo/config.toml` links with `mold` on `x86_64-unknown-linux-gnu`, so install `mold` or build
+with `RUSTFLAGS=""`. `crates/widevine` compiles C++, so a C++ compiler is required as well.
 
-#### Flatpak
-
-Add the Sonora repository (updates with `flatpak update`):
-
-```sh
-flatpak install --user https://sonorahq.github.io/sonora/sonora.flatpakref
-```
-
-#### AppImage
-
-Download the `x86_64` AppImage from the
-[latest release](https://github.com/sonorahq/sonora/releases/latest), make it executable and run
-it:
-
-```sh
-chmod +x sonora-*.AppImage
-./sonora-*.AppImage
-```
-
-An `aarch64` build is published beside it. The AppImage carries no Vulkan driver and no ALSA
-bridge, so both still come from your system. It does not update itself, but it carries its update
-information, so [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) or an
-AppImage manager such as [AppManager](https://github.com/kem-a/AppManager) can fetch a new release
-for you.
-
-### Nix
+#### Nix
 
 ```nix
-inputs.sonora.url = "github:sonorahq/sonora";
+inputs.tempo.url = "github:4jeel-cloud/tempo-desktop";
 ```
 
 ```text
-inputs.sonora.packages.${system}.default     (prebuilt where available, else from source)
-inputs.sonora.packages.${system}.sonora      (same as default)
-inputs.sonora.packages.${system}.sonora-bin  (prebuilt, x86_64-linux, aarch64-linux, aarch64-darwin)
-inputs.sonora.packages.${system}.sonora-src  (always built from source)
+inputs.tempo.packages.${system}.default     (prebuilt where available, else from source)
+inputs.tempo.packages.${system}.sonora      (same as default)
+inputs.tempo.packages.${system}.sonora-bin  (prebuilt, x86_64-linux, aarch64-linux, aarch64-darwin)
+inputs.tempo.packages.${system}.sonora-src  (always built from source)
 ```
 
-The prebuilt package downloads the latest tagged release. `sonora-src` compiles whatever
-revision of the flake you point it at, so pin the input to a tag such as
-`github:sonorahq/sonora/v0.43.0` to build a release. Building from source on macOS needs Xcode
-added to the Nix store, because the shaders compile with Apple's Metal compiler.
+## How to share a packaged build
 
-You can set configuration options via the included Home Manager module under `programs.sonora`:
+For friends who just want to install and play, build a `.deb` once and hand them the file:
 
-```nix
-{
-  imports = [ inputs.sonora.homeManagerModules.default ];
-  programs.sonora = {
-    enable = true;
-    settings = {
-      provider = "youtube";
-      appearance.theme = "dark";
-    };
-  };
-}
+```sh
+./scripts/package-deb.sh
 ```
 
-### Windows
-
-#### Installer
-
-Download and run the [installer](https://github.com/sonorahq/sonora/releases/latest/download/Sonora-Setup.exe),
-or the [ARM installer](https://github.com/sonorahq/sonora/releases/latest/download/Sonora-Setup-arm64.exe)
-on Windows on ARM.
-
-#### Portable
-
-Download the latest `windows-msvc.exe` for your architecture from [Releases](https://github.com/sonorahq/sonora/releases/latest).
-
-## Community
-
-Feel free to join our [Discord](https://discord.gg/a8N8Tx23rV) server and [Matrix](https://matrix.to/#/#sonora:nolight.dev) space.
-Discord is the primary one, but we do have a Matrix bridge.
-
-## AI policy
-
-We have nothing against the usage of LLMs in the project — in fact, we use them ourselves.
-We believe that AI can speed up development in a lot of meaningful ways and be a useful
-tool for learning new concepts. We have also found it particularly helpful for
-contributing to substantial codebases such as GPUI and librespot, where it has helped
-us quickly locate the relevant parts of the code.
-
-**However**, using AI cannot act as an excuse for failing to
-understand, review, and test the changes proposed. Furthermore, we expect communication
-with a real person, not a computer. This includes but is not limited to PR/issue text
-generation, comments in discussions, etc. A short summary of minor changes can be
-generated and does not need to be disclosed explicitly, but the reasoning and motivation
-behind a change must come from the contributor and reflect their own understanding.
-
-Note that PRs that fail to adhere to these requirements may be rejected without further notice.
-
-AI-assisted proofreading and translation of human-written text are permitted.
+The script builds the release binary and produces `dist/tempo-desktop_<version>_amd64.deb`. A friend
+on Debian or Ubuntu installs it with a single `apt install ./…deb` and launches it from the menu —
+no toolchain, no setup. Upload the `.deb` to
+[Releases](https://github.com/4jeel-cloud/tempo-desktop/releases) so it can be linked and downloaded.
 
 ## Translations
 
@@ -222,44 +119,26 @@ AI-assisted proofreading and translation of human-written text are permitted.
 
 <!-- i18n:end -->
 
-## Star History
-
-<a href="https://www.star-history.com/?repos=sonorahq%2Fsonora&type=date&logscale=&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=sonorahq/sonora&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=sonorahq/sonora&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=sonorahq/sonora&type=date&legend=top-left" />
- </picture>
-</a>
-
 ## Credits
 
-Sonora is built with the help of some incredible open-source projects, including:
+Tempo Desktop exists because of [Sonora](https://github.com/sonorahq/sonora), the upstream project
+this fork is built on. It is built with the help of some incredible open-source projects, including:
 
-- [Zed](https://github.com/zed-industries/zed) — a wonderful editor (~~ab~~)used by all core team members. Conveniently provides `gpui` — their native Rust rendering stack.
+- [Zed](https://github.com/zed-industries/zed) — provides `gpui`, the native Rust rendering stack.
 - [librespot](https://github.com/librespot-org/librespot) — Spotify playback and library integration.
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — certain YouTube ideas implemented in [ytmusic-rs](https://github.com/sonorahq/ytmusic-rs) :)
-
-## Code signing policy
-
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by
-[SignPath Foundation](https://signpath.org).
-
-The Windows executable and installer are built by GitHub Actions from this repository and signed
-through SignPath.
-
-- Reviewers: members of sonorahq
-- Approvers: [@nolight132](https://github.com/nolight132)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — certain YouTube ideas implemented in
+  [ytmusic-rs](https://github.com/sonorahq/ytmusic-rs).
 
 ## License
 
-Copyright (C) 2026 Sonora Contributors.
+Copyright (C) 2026 Tempo Desktop Contributors.
 
-Sonora is free software, released under the [GNU General Public License version
-3 or later](COPYING).
+Tempo Desktop is free software, released under the [GNU General Public License version
+3 or later](COPYING). As a fork of Sonora, it is distributed under the same license and with the
+same upstream credits.
 
-Sonora is an unofficial client and is not affiliated with, endorsed by, or
-sponsored by Spotify AB.
+Tempo Desktop is an unofficial client and is not affiliated with, endorsed by, or sponsored by
+Spotify AB or YouTube.
 
 The binary also embeds the [Inter](https://github.com/rsms/inter) typeface (SIL
 Open Font License 1.1) and four interchangeable icon sets:

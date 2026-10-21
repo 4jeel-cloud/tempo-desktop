@@ -27,12 +27,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Sonora now opens straight into YouTube Music as a guest, like the mobile app: no sign-in is
+  asked for on first launch, and adding an account stays optional in Settings. Spotify, Apple
+  Music, Deezer and Subsonic are no longer offered; an install set to one of them moves to
+  YouTube Music.
 - The Prefer local lyrics switch is gone. Lyrics in a file's own tags now compete with the
   online providers, so synced lyrics found online beat plain ones in the file. Rank Local first
   to have it win when both are equally good.
 - Toasts have a new look. New ones pile up in front of older ones, and pointing at the pile
   spreads it out and keeps every toast on screen until you move away. Drag a toast to the right
   to dismiss it.
+- Sonora is now Tempo Desktop. The name on the window, menus, tray and installer, and the app
+  icon, all show the new identity. Downloads, settings and the sign-in flow are unchanged.
+- Tempo Desktop is now a YouTube Music client. Spotify, Apple Music, Deezer and Subsonic are no
+  longer offered, and first launch opens YouTube Music as a guest with no sign-in. Local files
+  still play alongside.
+- A `scripts/package-deb.sh` script builds a Debian package, so the app can be installed with a
+  single `apt install ./…deb` and launched from the app menu.
 
 ### Fixed
 
