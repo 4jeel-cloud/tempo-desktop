@@ -2,10 +2,11 @@ name: deb
 
 # Builds the Debian package and attaches it to a GitHub Release, so a friend can download
 # tempo-desktop_<version>_amd64.deb from the Releases page and install it with a single
-# `apt install ./…deb`. Runs when a `v*` tag is pushed, or by hand from the Actions tab.
+# `apt install ./…deb`. Runs when a `v*` or `tempo-v*` tag is pushed, or by hand from the
+# Actions tab.
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "tempo-v*"]
   workflow_dispatch:
 
 permissions:

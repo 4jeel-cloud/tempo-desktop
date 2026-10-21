@@ -100,8 +100,8 @@ YouTube Music as a guest.
 Push a version tag and GitHub Actions builds the `.deb` and attaches it to the Release:
 
 ```sh
-git tag v0.43.0
-git push tempo v0.43.0
+git tag tempo-v0.43.0
+git push tempo tempo-v0.43.0
 ```
 
 The [`deb` workflow](.github/workflows/deb.yml) then publishes `tempo-desktop_<version>_amd64.deb`
