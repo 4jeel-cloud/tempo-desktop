@@ -345,6 +345,9 @@ async fn engine_loop<F: Fetch>(
     let mut epoch = 0u64;
     let mut awaited: Option<u64> = None;
     let mut inflight: Option<tokio::task::AbortHandle> = None;
+    // the preload already on its way, so a load for the same track can wait for it rather than
+    // fetch the track a second time and throw the first download away
+    let mut warming: Option<(String, tokio::task::AbortHandle)> = None;
     let mut ahead: Option<(String, F::Loaded)> = None;
     // the track the audio thread is decoding, as far as the engine knows: set by a load, then
     // moved on by the audio thread's own word when a track runs out
@@ -387,9 +390,20 @@ async fn engine_loop<F: Fetch>(
                         }
                         segued = None;
                         waiting = None;
-                        epoch += 1;
                         if let Some(handle) = inflight.take() {
                             handle.abort();
+                        }
+                        let warmed = warming
+                            .as_ref()
+                            .is_some_and(|(warmed, _)| warmed == &id);
+                        if let Some((_, handle)) = warming.take() {
+                            match warmed {
+                                true => inflight = Some(handle),
+                                false => handle.abort(),
+                            }
+                        }
+                        if !warmed {
+                            epoch += 1;
                         }
                         cue.clear();
                         // The audio thread is still decoding the track this replaces. Clearing
@@ -432,12 +446,14 @@ async fn engine_loop<F: Fetch>(
                             None => {
                                 ahead = None;
                                 awaited = Some(epoch);
-                                inflight = Some(spawn(&fetch, id, epoch, false, &fetched));
+                                if !warmed {
+                                    inflight = Some(spawn(&fetch, id, epoch, false, &fetched));
+                                }
                             }
                         }
                     }
                     Command::Preload { id, segue } => {
-                        if current.is_none() || current.as_deref() == Some(id.as_str()) {
+                        if current.as_deref() == Some(id.as_str()) {
                             continue;
                         }
                         let held = ahead
@@ -460,7 +476,17 @@ async fn engine_loop<F: Fetch>(
                                 }
                             }
                             None => {
-                                spawn(&fetch, id, epoch, segue, &fetched);
+                                if warming
+                                    .as_ref()
+                                    .is_some_and(|(warmed, _)| warmed == &id)
+                                {
+                                    continue;
+                                }
+                                if let Some((_, handle)) = warming.take() {
+                                    handle.abort();
+                                }
+                                warming =
+                                    Some((id.clone(), spawn(&fetch, id, epoch, segue, &fetched)));
                             }
                         }
                     }
@@ -501,6 +527,12 @@ async fn engine_loop<F: Fetch>(
                 let Some(Fetched { epoch: at, id, segue, result }) = arrival else { break };
                 if at != epoch {
                     continue;
+                }
+                if warming
+                    .as_ref()
+                    .is_some_and(|(warmed, _)| warmed == &id)
+                {
+                    warming = None;
                 }
                 let loaded = match result {
                     Ok(loaded) => loaded,

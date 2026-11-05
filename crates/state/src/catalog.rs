@@ -14,6 +14,7 @@ const ARTIST_PROFILES: usize = 64;
 const ALBUMS: usize = 48;
 const ALBUM_CATALOGUES: usize = 48;
 const PLAYLISTS: usize = 16;
+const PLAYLIST_TRACKS: usize = 8;
 const SONGS: usize = 64;
 const GENRES: usize = 24;
 
@@ -38,6 +39,7 @@ trait CatalogBackend: Send + Sync {
         Ok(AlbumCatalogue::default())
     }
     async fn playlist(&self, id: &str) -> Result<PlaylistDetail>;
+    async fn playlist_tracks(&self, id: &str) -> Result<Vec<Track>>;
     async fn playlist_continuation(
         &self,
         continuation: &str,
@@ -80,6 +82,9 @@ impl CatalogBackend for ApiBackend {
     async fn playlist(&self, id: &str) -> Result<PlaylistDetail> {
         self.0.playlist(id).await
     }
+    async fn playlist_tracks(&self, id: &str) -> Result<Vec<Track>> {
+        self.0.playlist_tracks(id).await
+    }
     async fn playlist_continuation(
         &self,
         continuation: &str,
@@ -88,6 +93,56 @@ impl CatalogBackend for ApiBackend {
     }
     async fn genre(&self, id: &str) -> Result<GenreDetail> {
         self.0.genre(id).await
+    }
+}
+
+/// Answers for a playlist kept on this machine while nobody is signed in. Only the playlist
+/// itself and its tracks can be read; the rest of a catalog needs a provider.
+struct GuestBackend(Arc<crate::guest::GuestStore>);
+
+#[async_trait]
+impl CatalogBackend for GuestBackend {
+    async fn artist(&self, id: &str) -> Result<Artist> {
+        Err(anyhow!("no signed-out artist {id}"))
+    }
+
+    async fn artist_profile(&self, id: &str) -> Result<ArtistProfile> {
+        Err(anyhow!("no signed-out artist {id}"))
+    }
+
+    async fn artist_images(&self, _ids: Vec<String>) -> Result<HashMap<String, String>> {
+        Ok(HashMap::new())
+    }
+
+    async fn track(&self, id: &str) -> Result<Track> {
+        self.0.track(id)
+    }
+
+    async fn track_playcount(&self, _id: &str) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
+    async fn album(&self, id: &str) -> Result<AlbumDetail> {
+        Err(anyhow!("no signed-out album {id}"))
+    }
+
+    async fn playlist(&self, id: &str) -> Result<PlaylistDetail> {
+        self.0.playlist(id)
+    }
+
+    async fn playlist_tracks(&self, id: &str) -> Result<Vec<Track>> {
+        self.0.tracks(id)
+    }
+
+    async fn playlist_continuation(
+        &self,
+        _continuation: &str,
+    ) -> Result<(Vec<Track>, Option<String>)> {
+        Ok((Vec::new(), None))
+    }
+
+    async fn genre(&self, id: &str) -> Result<GenreDetail> {
+        Err(anyhow!("no signed-out genre {id}"))
     }
 }
 
@@ -149,6 +204,7 @@ pub(crate) struct CatalogSource {
     albums: CatalogCache<AlbumDetail>,
     album_catalogues: CatalogCache<AlbumCatalogue>,
     playlists: CatalogCache<PlaylistDetail>,
+    tracks: CatalogCache<Vec<Track>>,
     songs: CatalogCache<SongPage>,
     genres: CatalogCache<GenreDetail>,
 }
@@ -156,6 +212,11 @@ pub(crate) struct CatalogSource {
 impl CatalogSource {
     pub(crate) fn new(client: Arc<dyn MusicApi>) -> Self {
         Self::from_backend(Arc::new(ApiBackend(client)))
+    }
+
+    /// A catalog that answers for the playlists kept on this machine while signed out.
+    pub(crate) fn guest(store: Arc<crate::guest::GuestStore>) -> Self {
+        Self::from_backend(Arc::new(GuestBackend(store)))
     }
 
     fn from_backend(backend: Arc<dyn CatalogBackend>) -> Self {
@@ -167,6 +228,7 @@ impl CatalogSource {
             albums: CatalogCache::new(ALBUMS),
             album_catalogues: CatalogCache::new(ALBUM_CATALOGUES),
             playlists: CatalogCache::new(PLAYLISTS),
+            tracks: CatalogCache::new(PLAYLIST_TRACKS),
             songs: CatalogCache::new(SONGS),
             genres: CatalogCache::new(GENRES),
         }
@@ -245,8 +307,15 @@ impl CatalogSource {
         self.playlists.load(id, self.backend.playlist(id)).await
     }
 
+    /// Every track of a playlist, kept so a second play, a queue add or a prefetch does not
+    /// read the provider's pages again.
+    pub(crate) async fn playlist_tracks(&self, id: &str) -> Result<Arc<Vec<Track>>> {
+        self.tracks.load(id, self.backend.playlist_tracks(id)).await
+    }
+
     pub(crate) async fn invalidate_playlist(&self, id: &str) {
         self.playlists.invalidate(id).await;
+        self.tracks.invalidate(id).await;
     }
 
     pub(crate) async fn playlist_continuation(
@@ -539,6 +608,10 @@ mod tests {
         async fn playlist(&self, id: &str) -> anyhow::Result<PlaylistDetail> {
             self.count("playlist", id);
             Ok(self.playlist_value(id))
+        }
+        async fn playlist_tracks(&self, id: &str) -> anyhow::Result<Vec<Track>> {
+            self.count("playlist_tracks", id);
+            Ok(self.playlist_value(id).tracks)
         }
         async fn playlist_continuation(
             &self,

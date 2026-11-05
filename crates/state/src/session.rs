@@ -12,6 +12,7 @@ use music::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::catalog::CatalogSource;
+use crate::guest::{GuestStore, is_guest_playlist};
 use crate::settings::AppSettings;
 use crate::{Io, Network, Outcome, Scan, Shelf, Toast, Toasts, join};
 
@@ -109,6 +110,7 @@ pub struct Session {
     settings: Entity<AppSettings>,
     client: Option<Arc<dyn MusicApi>>,
     catalog: Option<Arc<CatalogSource>>,
+    guest_catalog: Arc<CatalogSource>,
     playback: Option<Arc<dyn PlaybackFactory>>,
     shape: Shape,
     authenticated: bool,
@@ -144,6 +146,7 @@ impl Session {
     pub fn new(
         providers: Vec<Arc<dyn MusicProvider>>,
         local_provider: Arc<dyn MusicProvider>,
+        guest: Arc<GuestStore>,
         settings: Entity<AppSettings>,
         io: Io,
         cx: &mut Context<Self>,
@@ -172,6 +175,7 @@ impl Session {
             settings,
             client: None,
             catalog: None,
+            guest_catalog: Arc::new(CatalogSource::guest(guest)),
             playback: None,
             shape: Shape::Saved,
             authenticated: false,
@@ -233,10 +237,19 @@ impl Session {
     }
 
     pub(crate) fn catalog(&self, id: &str) -> Option<Arc<CatalogSource>> {
-        match music::is_local_id(id) {
-            true => self.local_catalog.clone(),
-            false => self.catalog.clone(),
+        if is_guest_playlist(id) {
+            Some(self.guest_catalog.clone())
+        } else {
+            match music::is_local_id(id) {
+                true => self.local_catalog.clone(),
+                false => self.catalog.clone(),
+            }
         }
+    }
+
+    /// The catalog that answers for playlists kept on this machine while signed out.
+    pub(crate) fn guest_catalog(&self) -> Arc<CatalogSource> {
+        self.guest_catalog.clone()
     }
 
     pub fn local_playback(&self) -> Option<Arc<dyn PlaybackFactory>> {

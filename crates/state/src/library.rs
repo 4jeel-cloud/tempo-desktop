@@ -271,6 +271,37 @@ impl Addition {
                 .collect()),
         }
     }
+
+    /// The tracks themselves, for a signed-out playlist that stores full snapshots rather than
+    /// ids a provider can look up again.
+    async fn resolve_tracks(
+        self,
+        client: Option<&Arc<dyn MusicApi>>,
+    ) -> anyhow::Result<Vec<Track>> {
+        match self {
+            Self::Tracks(ids) => {
+                let Some(client) = client else {
+                    anyhow::bail!("no streaming client to read tracks");
+                };
+                let mut tracks = Vec::with_capacity(ids.len());
+                for id in ids {
+                    match client.track(&id).await {
+                        Ok(track) => tracks.push(track),
+                        Err(error) => {
+                            log::warn!("library: cannot read a track for a playlist: {error:#}")
+                        }
+                    }
+                }
+                Ok(tracks)
+            }
+            Self::Album(id) => {
+                let Some(client) = client else {
+                    anyhow::bail!("no streaming client to read an album");
+                };
+                client.album_tracks(&id).await
+            }
+        }
+    }
 }
 
 struct PlaylistMutation {
@@ -577,6 +608,63 @@ impl Library {
         S::hold(self, item.clone(), saved);
         let sweep = (announce && !saved).then(|| self.gather(S::FAMILY, cx));
 
+        if self.session.read(cx).guest() {
+            let store = self.guest.clone();
+            let kind = S::GUEST_KIND;
+            let asked = id.clone();
+            let answered = id.clone();
+            let target = S::target(&id);
+            let io = self.io.clone();
+            let payload = item.clone();
+            let task = cx.spawn(async move |this, cx| {
+                let result = join(io.spawn(async move {
+                    match saved {
+                        true => store.star(kind, &asked, &payload),
+                        false => store.unstar(kind, &asked),
+                    }
+                }))
+                .await;
+                this.update(cx, |this, cx| {
+                    S::requests(this).remove(&answered);
+                    let gone = match result {
+                        Ok(()) if saved => {
+                            S::admit(this, item, cx);
+                            None
+                        }
+                        Ok(()) => previous.map(S::gone),
+                        Err(error) => {
+                            let name = match &previous {
+                                Some(previous) => previous.title().to_owned(),
+                                None => item.title().to_owned(),
+                            };
+                            match previous {
+                                Some(previous) => S::hold(this, previous, true),
+                                None => S::hold(this, item, false),
+                            }
+                            log::warn!(
+                                "library: cannot update the signed-out {}: {error:#}",
+                                S::TROUBLE
+                            );
+                            let key = match saved {
+                                true => "toast-library-add-failed",
+                                false => "toast-library-remove-failed",
+                            };
+                            Toasts::linked(Outcome::Failed, key, name, target, cx);
+                            None
+                        }
+                    };
+                    if let Some(sweep) = sweep {
+                        this.answer(sweep, gone, cx);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            });
+            S::requests(self).insert(id, task);
+            cx.notify();
+            return;
+        }
+
         let asked = id.clone();
         let answered = id.clone();
         let target = S::target(&id);
@@ -756,10 +844,12 @@ impl Library {
     }
 }
 
-trait Savable: Clone + Send + Sized + 'static {
+trait Savable: Clone + Send + Sized + serde::Serialize + 'static {
     const TROUBLE: &'static str;
     /// The family whose toast reports this kind's removals.
     const FAMILY: Family;
+    /// The row a signed-out favorite of this kind writes to.
+    const GUEST_KIND: crate::guest::Kind;
 
     fn id(&self) -> Option<&str>;
     fn title(&self) -> &str;
@@ -783,6 +873,7 @@ trait Savable: Clone + Send + Sized + 'static {
 impl Savable for Track {
     const TROUBLE: &'static str = "saved track";
     const FAMILY: Family = Family::SavedTracks;
+    const GUEST_KIND: crate::guest::Kind = crate::guest::Kind::Track;
 
     fn gone(self) -> Gone {
         Gone::SavedTrack(self)
@@ -849,6 +940,7 @@ impl Savable for Track {
 impl Savable for Album {
     const TROUBLE: &'static str = "saved album";
     const FAMILY: Family = Family::SavedAlbums;
+    const GUEST_KIND: crate::guest::Kind = crate::guest::Kind::Album;
 
     fn gone(self) -> Gone {
         Gone::SavedAlbum(self)
@@ -895,6 +987,7 @@ impl Savable for Album {
 impl Savable for SavedArtist {
     const TROUBLE: &'static str = "favorite artist";
     const FAMILY: Family = Family::SavedArtists;
+    const GUEST_KIND: crate::guest::Kind = crate::guest::Kind::Artist;
 
     fn gone(self) -> Gone {
         Gone::SavedArtist(self)
@@ -1076,6 +1169,8 @@ pub struct Library {
     shelves: [Held; 2],
     session: Entity<Session>,
     io: Io,
+    guest: Arc<crate::guest::GuestStore>,
+    guest_task: Option<Task<()>>,
     playlist_task: Option<Task<()>>,
     pin_targets_task: Option<Task<()>>,
     pin_task: Option<Task<()>>,
@@ -1108,6 +1203,7 @@ impl Library {
         session: Entity<Session>,
         io: Io,
         cache: storage::Cache,
+        guest: Arc<crate::guest::GuestStore>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.subscribe(&session, |this, session, event, cx| match event {
@@ -1117,8 +1213,7 @@ impl Library {
                 if !session.read(cx).authenticated() {
                     this.pin_targets_task = None;
                     this.pin_targets = None;
-                    this.held_mut(Shelf::Streaming).clear();
-                    cx.notify();
+                    this.load_guest(cx);
                     return;
                 }
                 this.pin_targets = None;
@@ -1170,6 +1265,8 @@ impl Library {
             shelves: [Held::empty(), Held::empty()],
             session,
             io,
+            guest,
+            guest_task: None,
             playlist_task: None,
             pin_targets_task: None,
             pin_task: None,
@@ -1271,8 +1368,77 @@ impl Library {
         }));
     }
 
-    /// Remembers a list that has just arrived in full, for the next launch to show. A part that
-    /// failed keeps whatever was remembered before it.
+    /// Fills the streaming shelf from this machine for a listener who is not signed in, so their
+    /// own playlists and favorites still show and need no provider to read.
+    fn load_guest(&mut self, cx: &mut Context<Self>) {
+        self.epochs[Shelf::Streaming.slot()] += 1;
+        self.playlist_task = None;
+        self.contents.clear();
+        self.reading.clear();
+        self.mosaics.clear();
+        self.pending.clear();
+        self.pending_albums.clear();
+        self.pending_artists.clear();
+        self.pending_library.clear();
+        {
+            let held = self.held_mut(Shelf::Streaming);
+            held.shape = Shape::Saved;
+            held.awaited.clear();
+            held.stale.clear();
+            held.expected.clear();
+            held.starred = Starred {
+                tracks: Rows::default(),
+                albums: Rows::default(),
+                artists: Rows::default(),
+            };
+            held.state = LibraryState::Loading;
+        }
+        cx.notify();
+
+        let guest = self.guest.clone();
+        let io = self.io.clone();
+        self.guest_task = Some(cx.spawn(async move |this, cx| {
+            let loaded = join(io.spawn_blocking(move || {
+                anyhow::Ok((
+                    guest.saved_tracks()?,
+                    guest.saved_albums()?,
+                    guest.saved_artists()?,
+                    guest.playlists()?,
+                ))
+            }))
+            .await;
+            this.update(cx, |this, cx| {
+                this.guest_task = None;
+                match loaded {
+                    Ok((tracks, albums, artists, playlists)) => {
+                        log::debug!(
+                            "library: the signed-out shelf holds {} songs, {} playlists, {} albums \
+                             and {} artists",
+                            tracks.len(),
+                            playlists.len(),
+                            albums.len(),
+                            artists.len()
+                        );
+                        this.held_mut(Shelf::Streaming).state = LibraryState::Ready(Ready {
+                            tracks: tracks.into(),
+                            playlists: playlists.into(),
+                            albums: albums.into(),
+                            artists: artists.into(),
+                            problems: Vec::new(),
+                        });
+                    }
+                    Err(error) => {
+                        log::warn!("library: cannot load the signed-out shelf: {error:#}");
+                        this.held_mut(Shelf::Streaming).state =
+                            LibraryState::Failed(format!("{error:#}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     fn keep(&self, shelf: Shelf, kind: Kind, part: LibraryPart, cx: &App) {
         let Some(provider) = self.provider_of(shelf, cx) else {
             return;
@@ -1770,6 +1936,10 @@ impl Library {
         shelf: Shelf,
         cx: &mut Context<Self>,
     ) {
+        if self.session.read(cx).guest() {
+            self.create_guest_playlist(name, addition, cx);
+            return;
+        }
         self.mutate_playlist(
             PlaylistMutation {
                 action: "create playlist",
@@ -1809,6 +1979,10 @@ impl Library {
     }
 
     pub fn rename_playlist(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+        if crate::guest::is_guest_playlist(&id) {
+            self.rename_guest_playlist(id, name, cx);
+            return;
+        }
         let renamed = (id.clone(), name.clone());
         self.mutate_playlist(
             PlaylistMutation {
@@ -1829,6 +2003,10 @@ impl Library {
     }
 
     pub fn set_playlist_public(&mut self, id: String, public: bool, cx: &mut Context<Self>) {
+        if crate::guest::is_guest_playlist(&id) {
+            self.amend_playlist(&id, |playlist| playlist.public = public, cx);
+            return;
+        }
         let changed = id.clone();
         self.mutate_playlist(
             PlaylistMutation {
@@ -1866,6 +2044,10 @@ impl Library {
         cx: &mut Context<Self>,
     ) {
         if addition.is_empty() {
+            return;
+        }
+        if crate::guest::is_guest_playlist(&playlist_id) {
+            self.add_guest_tracks(playlist_id, addition, cx);
             return;
         }
         let added = playlist_id.clone();
@@ -1926,6 +2108,10 @@ impl Library {
         if track_ids.is_empty() {
             return;
         }
+        if crate::guest::is_guest_playlist(&playlist_id) {
+            self.remove_guest_tracks(playlist_id, track_ids, cx);
+            return;
+        }
         let emptied = playlist_id.clone();
         let dropped = track_ids.clone();
         let dropped_count = track_ids.len() as u32;
@@ -1976,6 +2162,10 @@ impl Library {
     }
 
     pub fn delete_playlist(&mut self, id: String, cx: &mut Context<Self>) {
+        if crate::guest::is_guest_playlist(&id) {
+            self.delete_guest_playlist(id, cx);
+            return;
+        }
         let deleted = id.clone();
         self.mutate_playlist(
             PlaylistMutation {
@@ -2315,6 +2505,7 @@ impl Library {
             .iter()
             .filter(|playlist| playlist.owned || playlist.collaborative)
             .map(|playlist| playlist.id.clone())
+            .filter(|id| !crate::guest::is_guest_playlist(id))
             .filter(|id| {
                 (shelf.local() || !self.contents.contains_key(id)) && !self.reading.contains_key(id)
             })
@@ -2379,6 +2570,208 @@ impl Library {
         self.held_mut(Shelf::of(id))
             .ready_mut()
             .map(|ready| &mut ready.playlists)
+    }
+
+    fn create_guest_playlist(&mut self, name: String, addition: Addition, cx: &mut Context<Self>) {
+        self.mutate_guest_playlist(
+            PlaylistMutation {
+                action: "create playlist",
+                done: Some("toast-playlist-created"),
+                name: None,
+                target: None,
+                shelf: Shelf::Streaming,
+                invalidated: Vec::new(),
+            },
+            move |store, client| async move {
+                let tracks = addition.resolve_tracks(client.as_ref()).await?;
+                store.create_playlist(&name, &tracks)
+            },
+            Self::insert_playlist,
+            cx,
+        );
+    }
+
+    fn rename_guest_playlist(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+        let renamed = (id.clone(), name.clone());
+        self.mutate_guest_playlist(
+            PlaylistMutation {
+                action: "rename playlist",
+                done: Some("toast-playlist-renamed"),
+                name: None,
+                target: None,
+                shelf: Shelf::Streaming,
+                invalidated: vec![id.clone()],
+            },
+            move |store, _| async move { store.rename_playlist(&id, &name) },
+            move |this, (), cx| {
+                let (id, name) = renamed;
+                this.amend_playlist(&id, |playlist| playlist.name = name, cx);
+            },
+            cx,
+        );
+    }
+
+    fn delete_guest_playlist(&mut self, id: String, cx: &mut Context<Self>) {
+        let deleted = id.clone();
+        self.mutate_guest_playlist(
+            PlaylistMutation {
+                action: "delete playlist",
+                done: Some("toast-playlist-deleted"),
+                name: None,
+                target: None,
+                shelf: Shelf::Streaming,
+                invalidated: vec![id.clone()],
+            },
+            move |store, _| async move { store.delete_playlist(&id) },
+            move |this, (), cx| this.forget_playlist(&deleted, cx),
+            cx,
+        );
+    }
+
+    fn add_guest_tracks(
+        &mut self,
+        playlist_id: String,
+        addition: Addition,
+        cx: &mut Context<Self>,
+    ) {
+        let added = playlist_id.clone();
+        let target = Some(Target::Playlist(SharedString::from(playlist_id.clone())));
+        let name = self
+            .playlist(&playlist_id)
+            .map(|playlist| playlist.name.clone());
+        self.mutate_guest_playlist(
+            PlaylistMutation {
+                action: "add track to playlist",
+                done: Some("toast-track-added"),
+                name,
+                target,
+                shelf: Shelf::Streaming,
+                invalidated: vec![playlist_id.clone()],
+            },
+            move |store, client| async move {
+                let tracks = addition.resolve_tracks(client.as_ref()).await?;
+                store.add_tracks(&playlist_id, &tracks)?;
+                Ok(tracks)
+            },
+            move |this, tracks, cx| {
+                let added_count = tracks.len() as u32;
+                this.amend_playlist(&added, |playlist| playlist.track_count += added_count, cx);
+                if let Some(ids) = this.contents.get_mut(&added) {
+                    ids.extend(tracks.iter().filter_map(|track| track.id.clone()));
+                }
+                cx.emit(LibraryEvent::TrackAdded { playlist: added });
+            },
+            cx,
+        );
+    }
+
+    fn remove_guest_tracks(
+        &mut self,
+        playlist_id: String,
+        track_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let emptied = playlist_id.clone();
+        let dropped = track_ids.clone();
+        let dropped_count = track_ids.len() as u32;
+        let name = self
+            .playlist(&playlist_id)
+            .map(|playlist| playlist.name.clone());
+        self.mutate_guest_playlist(
+            PlaylistMutation {
+                action: "remove track from playlist",
+                done: None,
+                name: None,
+                target: None,
+                shelf: Shelf::Streaming,
+                invalidated: vec![playlist_id.clone()],
+            },
+            move |store, _| async move { store.remove_tracks(&playlist_id, &track_ids) },
+            move |this, (), cx| {
+                this.raise_rows(&emptied, name, dropped.clone(), cx);
+                this.amend_playlist(
+                    &emptied,
+                    |playlist| {
+                        playlist.track_count = playlist.track_count.saturating_sub(dropped_count)
+                    },
+                    cx,
+                );
+                if let Some(ids) = this.contents.get_mut(&emptied) {
+                    for track in &dropped {
+                        ids.remove(track);
+                    }
+                }
+                for track in dropped {
+                    cx.emit(LibraryEvent::TrackDropped {
+                        playlist: emptied.clone(),
+                        track,
+                    });
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Runs a change to a signed-out playlist off the main thread, then applies it to the shelf
+    /// the way `mutate_playlist` does for a provider's own playlist.
+    fn mutate_guest_playlist<F, R, T, A>(
+        &mut self,
+        mutation_info: PlaylistMutation,
+        work: F,
+        on_done: A,
+        cx: &mut Context<Self>,
+    ) where
+        F: FnOnce(Arc<crate::guest::GuestStore>, Option<Arc<dyn MusicApi>>) -> R + Send + 'static,
+        R: Future<Output = anyhow::Result<T>> + Send + 'static,
+        T: Send + 'static,
+        A: FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+    {
+        let PlaylistMutation {
+            action,
+            done,
+            name,
+            target,
+            invalidated,
+            ..
+        } = mutation_info;
+        if self.playlist_task.is_some() {
+            log::warn!("library: cannot {action} while another change is running");
+            Toasts::show(Outcome::Failed, "toast-playlist-busy", cx);
+            return;
+        }
+        let store = self.guest.clone();
+        let client = self.session.read(cx).client();
+        let catalog = self.session.read(cx).guest_catalog();
+        let io = self.io.clone();
+        self.playlist_task = Some(cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move { work(store, client).await })).await;
+            if result.is_ok() {
+                for id in &invalidated {
+                    catalog.invalidate_playlist(id).await;
+                }
+            }
+            this.update(cx, |this, cx| {
+                this.playlist_task = None;
+                match result {
+                    Ok(outcome) => {
+                        on_done(this, outcome, cx);
+                        match (done, name) {
+                            (Some(done), Some(name)) => {
+                                Toasts::linked(Outcome::Done, done, name, target, cx)
+                            }
+                            (Some(done), None) => Toasts::show(Outcome::Done, done, cx),
+                            (None, _) => {}
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("library: cannot {action}: {error:#}");
+                        Toasts::show(Outcome::Failed, "toast-playlist-failed", cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn mutate_playlist<F, R, T, A>(
@@ -2516,7 +2909,7 @@ impl Library {
     }
 
     pub fn refresh(&mut self, shelf: Shelf, cx: &mut Context<Self>) {
-        if shelf == Shelf::Streaming {
+        if shelf == Shelf::Streaming && !self.session.read(cx).guest() {
             self.sync_pin_targets(cx);
         }
         self.load(shelf, cx);
@@ -2529,6 +2922,10 @@ impl Library {
     /// favorites stay up either way until the new ones land, so a Favorites only filter shows
     /// what it showed before rather than nothing.
     fn load(&mut self, shelf: Shelf, cx: &mut Context<Self>) {
+        if shelf == Shelf::Streaming && self.session.read(cx).guest() {
+            self.load_guest(cx);
+            return;
+        }
         let session = self.session.read(cx);
         let Some(client) = session.client_of(shelf) else {
             return;

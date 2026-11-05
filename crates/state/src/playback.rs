@@ -677,6 +677,9 @@ impl Playback {
         self.seek_target = None;
         self.intent = Intent::Play;
         self.resume_ready = false;
+        // Start the next track's download alongside this one, so pressing next opens on the
+        // first read instead of waiting for a fetch that has not begun.
+        self.preload_upcoming(false, cx);
         cx.notify();
 
         let wait = self
@@ -1007,8 +1010,17 @@ impl Playback {
             }
             PinKind::Playlist => {
                 let playlist = id.clone();
+                let catalog = self.session.read(cx).catalog(&id);
                 self.enqueue_from("playlist", &id, origin, placement, cx, move |client| {
-                    Box::pin(async move { client.playlist_tracks(&playlist).await })
+                    Box::pin(async move {
+                        match catalog {
+                            Some(catalog) => catalog
+                                .playlist_tracks(&playlist)
+                                .await
+                                .map(|tracks| (*tracks).clone()),
+                            None => client.playlist_tracks(&playlist).await,
+                        }
+                    })
                 });
             }
             PinKind::Artist => {
@@ -1116,24 +1128,42 @@ impl Playback {
     ) {
         let id = origin.id.clone();
         let playlist = origin.id.clone();
+        let catalog = self.session.read(cx).catalog(&id);
         self.enqueue_from(
             "playlist",
             &id,
             Some(origin),
             placement,
             cx,
-            move |client| Box::pin(async move { client.playlist_tracks(&playlist).await }),
+            move |client| {
+                Box::pin(async move {
+                    match catalog {
+                        Some(catalog) => catalog
+                            .playlist_tracks(&playlist)
+                            .await
+                            .map(|tracks| (*tracks).clone()),
+                        None => client.playlist_tracks(&playlist).await,
+                    }
+                })
+            },
         );
     }
 
     fn play_playlist_of(&mut self, origin: Origin, cx: &mut Context<Self>) {
         let playlist = origin.id.clone();
+        let catalog = self.session.read(cx).catalog(&playlist);
         self.gather(origin, cx, move |client| {
             Box::pin(async move {
-                client
-                    .playlist_tracks(&playlist)
-                    .await
-                    .map(|tracks| (tracks, None))
+                match catalog {
+                    Some(catalog) => catalog
+                        .playlist_tracks(&playlist)
+                        .await
+                        .map(|tracks| ((*tracks).clone(), None)),
+                    None => client
+                        .playlist_tracks(&playlist)
+                        .await
+                        .map(|tracks| (tracks, None)),
+                }
             })
         });
     }

@@ -24,6 +24,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Copy link tells you it worked. Where there is no link to copy, the entry is greyed out and
   says why.
 - Sonora tells you when a library scan you started has finished.
+- Songs, albums and artists you like, and playlists you make, are kept on your computer while
+  you use Tempo Desktop without an account, so the heart and New playlist work as a guest.
 
 ### Changed
 
@@ -46,9 +48,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single `apt install ./…deb` and launched from the app menu.
 - Every tagged release now carries a Windows installer, `Tempo-Desktop-Setup.exe`, alongside the
   Linux `.deb`, so Windows users install Tempo Desktop with a normal setup wizard.
+- The search box sits at the top of the Search page instead of below a gap.
+- Tempo Desktop checks its own releases for updates, and the Windows update installs
+  `Tempo-Desktop-Setup.exe` in place.
 
 ### Fixed
 
+- Songs in a playlist start faster. The next track downloads while the current one plays, and
+  opening a playlist warms its track list so pressing play no longer reads every page first.
+- Creating, renaming, deleting and editing a playlist works without an account.
 - The minimize, maximize and close buttons on Windows 10 show their icons again instead of empty
   boxes.
 - On Windows, dragging the title bar, double-clicking it and the maximize button work every time

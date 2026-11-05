@@ -56,6 +56,7 @@ pub struct Detail {
     io: Io,
     task: Option<Task<()>>,
     request: Option<AbortHandle>,
+    warm: Option<AbortHandle>,
     fill: Option<Task<()>>,
     filling_request: Option<AbortHandle>,
     mosaic: Option<Task<()>>,
@@ -171,6 +172,7 @@ impl Detail {
             io,
             task: None,
             request: None,
+            warm: None,
             fill: None,
             filling_request: None,
             mosaic: None,
@@ -375,6 +377,20 @@ impl Detail {
         self.error = None;
         cx.notify();
 
+        if let Some(warm) = self.warm.take() {
+            warm.abort();
+        }
+        if matches!(kind, Collection::Playlist) {
+            let catalog = catalog.clone();
+            let warm_id = id.clone();
+            let warm = self.io.spawn(async move {
+                if let Err(error) = catalog.playlist_tracks(&warm_id).await {
+                    log::debug!("detail: cannot warm playlist {warm_id}: {error:#}");
+                }
+            });
+            self.warm = Some(warm.abort_handle());
+        }
+
         let request = self.io.spawn({
             let id = id.clone();
             async move {
@@ -485,6 +501,9 @@ impl Detail {
     fn clear(&mut self) {
         self.task = None;
         self.fill = None;
+        if let Some(warm) = self.warm.take() {
+            warm.abort();
+        }
         if let Some(request) = self.request.take() {
             request.abort();
         }

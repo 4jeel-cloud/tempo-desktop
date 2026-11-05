@@ -1019,7 +1019,6 @@ impl Render for SearchView {
             .flex_col()
             .size_full()
             .gap_6()
-            .pt(pad)
             .key_context(SEARCH_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::select_next))

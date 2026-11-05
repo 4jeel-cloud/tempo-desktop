@@ -5,6 +5,7 @@ mod detail;
 mod discord;
 mod drm;
 mod genre;
+mod guest;
 mod history;
 mod home;
 mod library;
@@ -210,8 +211,17 @@ pub fn init(
         settings.report_broken(cx);
         settings
     });
-    let session =
-        cx.new(|cx| Session::new(providers, local_provider, settings.clone(), io.clone(), cx));
+    let guest = guest::GuestStore::new(database.clone());
+    let session = cx.new(|cx| {
+        Session::new(
+            providers,
+            local_provider,
+            guest.clone(),
+            settings.clone(),
+            io.clone(),
+            cx,
+        )
+    });
     let network = cx.new(|_| Network::new(session.clone(), io.clone()));
     // A run that started without a network never signed out, so the account it kept is tried
     // again the moment there is one.
@@ -229,7 +239,7 @@ pub fn init(
     })
     .detach();
     let cache = storage::Cache::standard();
-    let library = cx.new(|cx| Library::new(session.clone(), io.clone(), cache, cx));
+    let library = cx.new(|cx| Library::new(session.clone(), io.clone(), cache, guest, cx));
     let queue = cx.new(|cx| Queue::new(session.clone(), settings.clone(), cx));
     let playback = cx.new(|cx| Playback::new(session.clone(), queue.clone(), settings.clone(), cx));
     let history = cx.new(|cx| {

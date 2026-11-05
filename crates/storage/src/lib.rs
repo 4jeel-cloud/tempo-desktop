@@ -60,6 +60,26 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS favorite_artists (
         artist_id TEXT PRIMARY KEY,
         added_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS guest_playlists (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        modified_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS guest_playlist_tracks (
+        playlist_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        track_json TEXT NOT NULL,
+        PRIMARY KEY (playlist_id, position)
+    );
+    CREATE INDEX IF NOT EXISTS guest_playlist_tracks_order
+        ON guest_playlist_tracks (playlist_id, position);
+    CREATE TABLE IF NOT EXISTS guest_favorites (
+        kind TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        added_at INTEGER NOT NULL,
+        item_json TEXT NOT NULL,
+        PRIMARY KEY (kind, item_id)
     );";
 
 #[derive(Clone)]
