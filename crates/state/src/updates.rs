@@ -213,7 +213,13 @@ async fn fetch(
     let wanted = listed
         .lines()
         .filter_map(|line| line.split_once(char::is_whitespace))
-        .find(|(_, name)| name.trim() == INSTALLER)
+        .find(|(_, name)| {
+            name.trim()
+                .trim_start_matches('*')
+                .rsplit(['/', '\\'])
+                .next()
+                == Some(INSTALLER)
+        })
         .map(|(sum, _)| sum.trim().to_ascii_lowercase())
         .context("the release lists no checksum for the installer")?;
 
