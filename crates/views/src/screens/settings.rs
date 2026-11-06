@@ -25,7 +25,7 @@ use router::{Destination, NavEntry, Screen, SettingsTab, navigate};
 use state::{
     AppSettings, CdmState, DiscordName, Drm, Failure, FullscreenControlsAutohide, Io,
     LYRICS_SOURCES, Playback, SYSTEM_FONT, Scan, ScrobbleState, Scrobbling, Session, SessionState,
-    Sleep, Sonora,
+    Sleep, Sonora, UpdateState, Updates,
 };
 use ui::{
     ActiveTheme as _, Deck, Ghost, LEADING, Scrollbar, Scroller, drop_gap, drop_marker, eyebrow,
@@ -267,16 +267,12 @@ struct Member {
 #[derive(Clone, Copy)]
 enum Role {
     LeadMaintainer,
-    Maintainer,
-    Contributor,
 }
 
 impl Role {
     fn label(self) -> SharedString {
         match self {
             Self::LeadMaintainer => t!("settings-role-lead-maintainer"),
-            Self::Maintainer => t!("settings-role-maintainer"),
-            Self::Contributor => t!("settings-role-contributor"),
         }
     }
 }
@@ -292,13 +288,7 @@ macro_rules! member {
     };
 }
 
-const MEMBERS: [Member; 5] = [
-    member!("nolight132", Role::LeadMaintainer),
-    member!("zxsleebu", Role::Maintainer),
-    member!("fx-got", Role::Maintainer),
-    member!("Makakashan", Role::Contributor),
-    member!("imizgun", Role::Contributor),
-];
+const MEMBERS: [Member; 1] = [member!("4jeel-cloud", Role::LeadMaintainer)];
 
 /// A lyrics source being dragged within the priority list. It draws as a chip under the cursor
 /// and changes the saved order only when dropped.
@@ -315,6 +305,7 @@ pub struct SettingsView {
     playback: Entity<Playback>,
     drm: Entity<Drm>,
     settings: Entity<AppSettings>,
+    updates: Entity<Updates>,
     tab: SettingsTab,
     search: Entity<Input>,
     /// The search field's text, trimmed. Empty means the page shows one category.
@@ -379,12 +370,14 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = Sonora::global(cx).settings.clone();
+        let updates = Sonora::global(cx).updates.clone();
         let scrobbling = Sonora::global(cx).scrobbling.clone();
         let drm = Sonora::global(cx).drm.clone();
         cx.observe(&drm, |_, _, cx| cx.notify()).detach();
         cx.observe(&session, |_, _, cx| cx.notify()).detach();
         cx.observe(&scrobbling, |_, _, cx| cx.notify()).detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&updates, |_, _, cx| cx.notify()).detach();
         cx.observe(&playback, |_, _, cx| cx.notify()).detach();
         cx.observe(&Scan::global(cx), |_, _, cx| cx.notify())
             .detach();
@@ -427,6 +420,7 @@ impl SettingsView {
             playback,
             drm,
             settings,
+            updates,
             tab: SettingsTab::General,
             search,
             query: String::new(),
@@ -2644,17 +2638,71 @@ impl SettingsView {
         let muted = theme.muted_foreground;
         let small = theme.text(Text::Small);
         let on = self.settings.read(cx).check_updates();
+        let updates = self.updates.read(cx);
+        let checking = updates.checking();
+        let installable = updates.installable();
+        let offered = updates.offered().cloned();
+        let failed = matches!(updates.state(), UpdateState::Failed);
+        let fetching = matches!(updates.state(), UpdateState::Fetching);
+        let current = matches!(updates.state(), UpdateState::Current);
+
+        let (detail, label, disabled) = match (fetching, checking, failed, &offered) {
+            (true, _, _, _) => (t!("update-working"), t!("update-working"), true),
+            (_, true, _, _) => (
+                t!("settings-update-checking"),
+                t!("settings-update-checking"),
+                true,
+            ),
+            (_, _, true, _) => (t!("update-failed"), t!("trouble-retry"), false),
+            (_, _, _, None) if current => (
+                t!("settings-update-current"),
+                t!("settings-update-check"),
+                false,
+            ),
+            (_, _, _, Some(release)) => (
+                t!("update-available", version = release.version.as_str()),
+                match installable {
+                    true => t!("update-now"),
+                    false => t!("update-notes"),
+                },
+                false,
+            ),
+            _ => (
+                t!("settings-check-updates-detail"),
+                t!("settings-update-check"),
+                false,
+            ),
+        };
+
+        let page = offered.as_ref().map(|release| release.page.clone());
+        let updates = self.updates.clone();
+        let action = Button::new("update-action")
+            .label(label)
+            .small()
+            .outline()
+            .disabled(disabled)
+            .on_click(move |_, _, cx| match (&page, installable) {
+                (Some(page), false) => cx.open_url(page),
+                (Some(_), true) => updates.update(cx, |updates, cx| updates.install(cx)),
+                (None, _) => updates.update(cx, |updates, cx| updates.check(cx)),
+            });
 
         self.row(
             t!("settings-check-updates"),
-            t!("settings-check-updates-detail"),
+            detail,
             muted,
             small,
-            Switch::new("check-updates", on)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_check_updates(!on, cx));
-                }))
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(action)
+                .child(Switch::new("check-updates", on).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.settings
+                            .update(cx, |settings, cx| settings.set_check_updates(!on, cx));
+                    },
+                )))
                 .into_any_element(),
         )
     }

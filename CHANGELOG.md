@@ -54,6 +54,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The About page now shows this fork's maintainer, and its update row says whether Tempo Desktop
+  is up to date, with a button to check, install or open what changed.
+- Update checks read the release page instead of the GitHub API, so they keep working after the
+  API's unauthenticated rate limit runs out.
 - Songs in a playlist start faster. The next track downloads while the current one plays, and
   opening a playlist warms its track list so pressing play no longer reads every page first.
 - Creating, renaming, deleting and editing a playlist works without an account.

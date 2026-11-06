@@ -110,7 +110,7 @@ impl AppNotice {
         let state = updates.state().clone();
         let installable = updates.installable();
         let (version, page) = match &state {
-            UpdateState::Quiet => return None,
+            UpdateState::Quiet | UpdateState::Current => return None,
             UpdateState::Offered(release) => (release.version.clone(), release.page.clone()),
             _ => (String::new(), String::new()),
         };

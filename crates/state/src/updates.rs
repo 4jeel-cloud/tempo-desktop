@@ -3,12 +3,12 @@ use std::process::Command;
 
 use anyhow::{Context as _, Result};
 use gpui::{Context, Entity, Task};
-use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::{AppSettings, Io, join};
 
-const LATEST: &str = "https://api.github.com/repos/4jeel-cloud/tempo-desktop/releases/latest";
+const REPO: &str = "https://github.com/4jeel-cloud/tempo-desktop";
+const LATEST: &str = "https://github.com/4jeel-cloud/tempo-desktop/releases/latest";
 const INSTALLER: &str = "Tempo-Desktop-Setup.exe";
 const SUMS: &str = "SHA256SUMS-windows";
 const UNINSTALLER: &str = "unins000.exe";
@@ -31,6 +31,7 @@ pub struct Release {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdateState {
     Quiet,
+    Current,
     Offered(Release),
     Fetching,
     Failed,
@@ -66,6 +67,20 @@ impl Updates {
             UpdateState::Offered(release) => Some(release),
             _ => None,
         }
+    }
+
+    /// Whether a release lookup is in flight. The page shows its checking state from this,
+    /// because a lookup keeps `Quiet` until it has an answer.
+    pub fn checking(&self) -> bool {
+        self.task.is_some()
+    }
+
+    /// Runs a release lookup now, rather than waiting for the next launch.
+    pub fn check(&mut self, cx: &mut Context<Self>) {
+        if self.task.is_some() {
+            return;
+        }
+        self.look(cx);
     }
 
     pub fn installable(&self) -> bool {
@@ -132,64 +147,47 @@ impl Updates {
                         this.state = UpdateState::Offered(release);
                         cx.notify();
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        this.state = UpdateState::Current;
+                        cx.notify();
+                    }
                     Err(error) => log::warn!("updates: cannot ask github: {error:#}"),
                 }
             })
             .ok();
         }));
+        cx.notify();
     }
 }
 
-#[derive(Deserialize)]
-struct Published {
-    tag_name: String,
-    html_url: String,
-    #[serde(default)]
-    assets: Vec<Asset>,
-}
-
-#[derive(Deserialize)]
-struct Asset {
-    name: String,
-    browser_download_url: String,
-}
-
 async fn latest(http: &reqwest::Client) -> Result<Option<Release>> {
-    let published: Published = http
+    // `/releases/latest` redirects to the newest release's tag page. Reading that redirect
+    // avoids the API's small unauthenticated rate limit, which otherwise leaves the app with
+    // no notice when it runs out.
+    let response = http
         .get(LATEST)
         .header("User-Agent", AGENT)
-        .header("Accept", "application/vnd.github+json")
         .send()
         .await
         .context("cannot reach github")?
         .error_for_status()
-        .context("github refused the release request")?
-        .json()
-        .await
-        .context("cannot read the github release")?;
+        .context("github refused the release request")?;
 
-    let version = published
-        .tag_name
-        .trim_start_matches("tempo-")
-        .trim_start_matches('v')
-        .to_owned();
-    if !newer(&version, RUNNING) {
+    let url = response.url().as_str().to_owned();
+    let Some((_, tag)) = url.split_once("/releases/tag/") else {
+        return Ok(None);
+    };
+    let tag = tag.trim_end_matches('/');
+    let version = tag.trim_start_matches("tempo-").trim_start_matches('v');
+    if !newer(version, RUNNING) {
         return Ok(None);
     }
-    let asset = |wanted: &str| {
-        published
-            .assets
-            .iter()
-            .find(|asset| asset.name == wanted)
-            .map(|asset| asset.browser_download_url.clone())
-    };
 
     Ok(Some(Release {
-        version,
-        page: published.html_url,
-        installer: asset(INSTALLER),
-        sums: asset(SUMS),
+        version: version.to_owned(),
+        page: format!("{REPO}/releases/tag/{tag}"),
+        installer: Some(format!("{REPO}/releases/download/{tag}/{INSTALLER}")),
+        sums: Some(format!("{REPO}/releases/download/{tag}/{SUMS}")),
     }))
 }
 
