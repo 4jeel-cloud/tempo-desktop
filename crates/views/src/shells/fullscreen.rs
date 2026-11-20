@@ -1048,6 +1048,7 @@ impl Shell for FullscreenView {
             offset: Pixels::ZERO,
             border: false,
             content: None,
+            search: None,
             transparent: ambient::shown(cx),
         }
     }

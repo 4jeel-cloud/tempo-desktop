@@ -13,9 +13,11 @@ use state::{
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use ui::WindowFrame;
-use ui::{ActiveTheme as _, Dismiss, Entrance, Look, Stillness, Theme, ThemeKind, clear_listing};
+use ui::{
+    ActiveTheme as _, Dismiss, Entrance, Input, Look, Stillness, Theme, ThemeKind, clear_listing,
+};
 
-use crate::chrome::{TitleBar, TitleBarEvent, TitleBarOptions, Toolbar, Tooled};
+use crate::chrome::{SearchBar, TitleBar, TitleBarEvent, TitleBarOptions, Toolbar, Tooled};
 use crate::screens::search::SearchView;
 use crate::screens::settings::SettingsHeader;
 use crate::shared::ambient::{self, Ambient};
@@ -72,6 +74,7 @@ pub struct Root {
     io: Io,
     login: Entity<LoginView>,
     title_bar: Entity<TitleBar>,
+    search_bar: Entity<SearchBar>,
     ambient: Entity<Ambient>,
     shells: Shells,
     view: RootView,
@@ -185,7 +188,23 @@ impl Root {
 
         let queries = cx.new(|cx| Search::new(session.clone(), search_library, io.clone(), cx));
         let genres = cx.new(|cx| Genres::new(session.clone(), io.clone(), cx));
-        let search = cx.new(|cx| SearchView::new(queries, genres.clone(), playback.clone(), cx));
+        let search_input = cx.new(|cx| {
+            let height = cx.theme().metrics.control;
+            Input::new("search-placeholder", cx)
+                .icon("icons/search.svg")
+                .height(height)
+                .clearable()
+        });
+        let search = cx.new(|cx| {
+            SearchView::new(
+                queries,
+                genres.clone(),
+                playback.clone(),
+                search_input.clone(),
+                cx,
+            )
+        });
+        let search_bar = cx.new(|cx| SearchBar::new(search_input, &search, cx));
 
         let settings = cx.new(|cx| SettingsView::new(session.clone(), playback.clone(), cx));
         let settings_header = cx.new(|cx| SettingsHeader::new(settings.clone(), cx));
@@ -280,6 +299,7 @@ impl Root {
             io,
             login,
             title_bar,
+            search_bar,
             shells: Shells {
                 workspace: workspace.clone(),
                 fullscreen,
@@ -486,7 +506,11 @@ impl Root {
         let content = self.toolbar.clone().map(Into::into);
 
         match self.view {
-            RootView::Workspace => self.shells.workspace.read(cx).title_bar(content, cx),
+            RootView::Workspace => {
+                let mut options = self.shells.workspace.read(cx).title_bar(content, cx);
+                options.search = Some(self.search_bar.clone().into());
+                options
+            }
             RootView::Fullscreen => self.shells.fullscreen.read(cx).title_bar(content, cx),
         }
     }

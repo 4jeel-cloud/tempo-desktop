@@ -90,15 +90,11 @@ impl SearchView {
         search: Entity<Search>,
         genres: Entity<Genres>,
         playback: Entity<Playback>,
+        input: Entity<Input>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&genres, |_, _, cx| cx.notify()).detach();
         genres.update(cx, |genres, cx| genres.load(cx));
-        let input = cx.new(|cx| {
-            Input::new("search-placeholder", cx)
-                .icon("icons/search.svg")
-                .clearable()
-        });
 
         cx.observe(&input, |this, input, cx| {
             let query = input.read(cx).text().to_owned();
@@ -158,7 +154,12 @@ impl SearchView {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
 
-    fn select_next(&mut self, _: &SelectNext, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_next(
+        &mut self,
+        _: &SelectNext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.search.read(cx).query().trim().is_empty() {
             return;
         }
@@ -185,7 +186,12 @@ impl SearchView {
         cx.notify();
     }
 
-    fn select_previous(&mut self, _: &SelectPrevious, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_previous(
+        &mut self,
+        _: &SelectPrevious,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some((column, row)) = self.cursor else {
             return;
         };
@@ -201,7 +207,12 @@ impl SearchView {
         cx.notify();
     }
 
-    fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_left(
+        &mut self,
+        _: &SelectLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let stacked = stacked(window, cx);
         let Some((column, _)) = self.cursor else {
             return;
@@ -215,7 +226,12 @@ impl SearchView {
         cx.notify();
     }
 
-    fn select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_right(
+        &mut self,
+        _: &SelectRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let stacked = stacked(window, cx);
         let Some((column, _)) = self.cursor else {
             return;
@@ -229,7 +245,12 @@ impl SearchView {
         cx.notify();
     }
 
-    fn activate_hit(&mut self, _: &Activate, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn activate_hit(
+        &mut self,
+        _: &Activate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some((column, row)) = self.cursor else {
             return;
         };
@@ -259,7 +280,12 @@ impl SearchView {
         }
     }
 
-    fn deselect_hit(&mut self, _: &Deselect, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn deselect_hit(
+        &mut self,
+        _: &Deselect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.cursor.take().is_none() {
             return;
         }
@@ -1019,6 +1045,7 @@ impl Render for SearchView {
             .flex_col()
             .size_full()
             .gap_6()
+            .pt(pad)
             .key_context(SEARCH_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::select_next))
@@ -1027,13 +1054,6 @@ impl Render for SearchView {
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::activate_hit))
             .on_action(cx.listener(Self::deselect_hit))
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .px(gutter)
-                    .child(self.input.clone()),
-            )
             .when(!stacked, |this| {
                 this.children(self.best(cx).map(|best| div().px(gutter).child(best)))
             })

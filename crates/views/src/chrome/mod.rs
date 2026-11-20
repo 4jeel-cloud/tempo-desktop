@@ -1,6 +1,7 @@
 mod aside;
 mod notice;
 mod player_bar;
+mod search_bar;
 mod sidebar_left;
 mod sidebar_right;
 mod title_bar;
@@ -11,6 +12,7 @@ pub(crate) mod tools;
 pub(crate) use aside::Aside;
 pub(crate) use notice::AppNotice;
 pub(crate) use player_bar::PlayerBar;
+pub(crate) use search_bar::SearchBar;
 pub(crate) use sidebar_left::SidebarLeft;
 pub(crate) use sidebar_right::SidebarRight;
 #[cfg(target_os = "macos")]

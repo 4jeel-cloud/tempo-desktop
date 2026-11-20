@@ -138,7 +138,7 @@ impl Render for Toolbar {
 
         div()
             .flex()
-            .flex_1()
+            .flex_none()
             .min_w_0()
             .items_center()
             .justify_end()
@@ -150,9 +150,9 @@ impl Render for Toolbar {
                     this.child(
                         div()
                             .flex()
-                            .flex_1()
+                            .flex_none()
+                            .w(WIDEST)
                             .min_w_0()
-                            .max_w(WIDEST)
                             .child(self.input.clone()),
                     )
                 })

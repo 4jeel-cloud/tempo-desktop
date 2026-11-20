@@ -10,10 +10,8 @@ Stream from YouTube Music and play your local files — all in one **native** ap
 </div>
 
 > [!NOTE]
-> **Tempo Desktop is a personal, unofficial fork of [Sonora](https://github.com/sonorahq/sonora),
-> rebranded and narrowed to YouTube Music.** It keeps the original GPL-3.0 license and credits the
-> upstream project for the vast majority of the application. If you want Spotify, Apple Music,
-> Deezer or Subsonic support, use upstream Sonora.
+> **Tempo Desktop is a personal, unofficial YouTube Music client built with Rust and GPUI.** It
+> plays YouTube Music alongside your local files, and signs you in only if you choose to.
 
 > [!IMPORTANT]
 > **Tempo Desktop is not a piracy tool.**
@@ -146,8 +144,7 @@ from the Actions tab. To build the package locally:
 
 ## Credits
 
-Tempo Desktop exists because of [Sonora](https://github.com/sonorahq/sonora), the upstream project
-this fork is built on. It is built with the help of some incredible open-source projects, including:
+Tempo Desktop is built with the help of some incredible open-source projects, including:
 
 - [Zed](https://github.com/zed-industries/zed) — provides `gpui`, the native Rust rendering stack.
 - [librespot](https://github.com/librespot-org/librespot) — Spotify playback and library integration.
@@ -159,8 +156,7 @@ this fork is built on. It is built with the help of some incredible open-source 
 Copyright (C) 2026 Tempo Desktop Contributors.
 
 Tempo Desktop is free software, released under the [GNU General Public License version
-3 or later](COPYING). As a fork of Sonora, it is distributed under the same license and with the
-same upstream credits.
+3 or later](COPYING).
 
 Tempo Desktop is an unofficial client and is not affiliated with, endorsed by, or sponsored by
 Spotify AB or YouTube.

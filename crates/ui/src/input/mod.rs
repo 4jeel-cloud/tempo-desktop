@@ -185,6 +185,7 @@ pub struct Input {
     hint: SharedString,
     icon: Option<SharedString>,
     compact: bool,
+    height: Option<Pixels>,
     tucked: bool,
     blurred: bool,
     clearable: bool,
@@ -207,6 +208,7 @@ impl Input {
             hint: hint.into(),
             icon: None,
             compact: false,
+            height: None,
             tucked: false,
             blurred: false,
             clearable: false,
@@ -230,6 +232,12 @@ impl Input {
 
     pub fn compact(mut self) -> Self {
         self.compact = true;
+        self
+    }
+
+    /// Overrides the height `compact` or the default field height would give the field.
+    pub fn height(mut self, height: impl Into<Pixels>) -> Self {
+        self.height = Some(height.into());
         self
     }
 

@@ -242,10 +242,10 @@ impl Element for Text {
 impl Render for Input {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
-        let height = match self.compact {
+        let height = self.height.unwrap_or(match self.compact {
             true => theme.metrics.control_small,
             false => theme.metrics.field,
-        };
+        });
         let radius = match self.tucked {
             true => crate::tucked(theme.radius, window),
             false => theme.radius,

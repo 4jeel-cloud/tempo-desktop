@@ -40,7 +40,10 @@ pub(crate) struct TitleBarOptions {
     pub sidebar_right: Option<bool>,
     pub offset: Pixels,
     pub border: bool,
+    /// Screen-scoped controls that sit beside the search field.
     pub content: Option<AnyView>,
+    /// The always-on search field, absent from the sign-in screen and fullscreen.
+    pub search: Option<AnyView>,
     /// Lets the fullscreen ambient background show through behind the controls.
     pub transparent: bool,
 }
@@ -54,6 +57,7 @@ impl Default for TitleBarOptions {
             offset: Pixels::ZERO,
             border: true,
             content: None,
+            search: None,
             transparent: false,
         }
     }
@@ -202,6 +206,7 @@ impl Render for TitleBar {
             false => Pixels::ZERO,
         };
         let content = self.options.content.clone();
+        let search = self.options.search.clone();
         let window_fullscreen = window.is_fullscreen();
         let settings = self.settings.read(cx);
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -277,7 +282,8 @@ impl Render for TitleBar {
                     .when(leading, |this| {
                         this.child(window_controls(true, traffic_light))
                     })
-                    .when(navigation, |this| this.child(self.toggle(cx))),
+                    .when(navigation, |this| this.child(self.toggle(cx)))
+                    .when(navigation, |this| this.child(self.history(cx))),
             )
             .child(
                 div()
@@ -286,7 +292,14 @@ impl Render for TitleBar {
                     .min_w_0()
                     .gap_1()
                     .items_center()
-                    .when(navigation, |this| this.child(self.history(cx)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .justify_center()
+                            .children(search),
+                    )
                     .children(content)
                     .pr_3(),
             )

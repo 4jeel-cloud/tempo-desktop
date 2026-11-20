@@ -48,9 +48,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single `apt install ./…deb` and launched from the app menu.
 - Every tagged release now carries a Windows installer, `Tempo-Desktop-Setup.exe`, alongside the
   Linux `.deb`, so Windows users install Tempo Desktop with a normal setup wizard.
-- The search box sits at the top of the Search page instead of below a gap.
-- Tempo Desktop checks its own releases for updates, and the Windows update installs
-  `Tempo-Desktop-Setup.exe` in place.
+- The search box now sits in the title bar, so search is available from every screen rather
+  than only on the Search page.
+- Tempo Desktop checks its own releases for updates. Windows installs its setup wizard in place,
+  and Linux installs the new `.deb` after asking for your administrator password.
 
 ### Fixed
 

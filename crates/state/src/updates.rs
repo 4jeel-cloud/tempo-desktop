@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use gpui::{Context, Entity, Task};
 use sha2::{Digest as _, Sha256};
 
@@ -9,11 +9,18 @@ use crate::{AppSettings, Io, join};
 
 const REPO: &str = "https://github.com/4jeel-cloud/tempo-desktop";
 const LATEST: &str = "https://github.com/4jeel-cloud/tempo-desktop/releases/latest";
+#[cfg(target_os = "windows")]
 const INSTALLER: &str = "Tempo-Desktop-Setup.exe";
+#[cfg(target_os = "windows")]
 const SUMS: &str = "SHA256SUMS-windows";
+#[cfg(target_os = "windows")]
 const UNINSTALLER: &str = "unins000.exe";
+#[cfg(target_os = "linux")]
+const DEB: &str = "tempo-desktop_";
+#[cfg(target_os = "linux")]
+const SUMS: &str = "SHA256SUMS";
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
-const INSTALLABLE: bool = cfg!(target_os = "windows");
+const INSTALLABLE: bool = cfg!(target_os = "windows") || cfg!(target_os = "linux");
 const AGENT: &str = concat!(
     "tempo-desktop/",
     env!("CARGO_PKG_VERSION"),
@@ -107,13 +114,17 @@ impl Updates {
         self.state = UpdateState::Fetching;
         cx.notify();
 
+        let Some(file) = installer.rsplit('/').next().map(ToOwned::to_owned) else {
+            return;
+        };
         let http = self.http.clone();
         let io = self.io.clone();
         let version = release.version;
         self.task = Some(cx.spawn(async move |this, cx| {
-            let fetched =
-                join(io.spawn(async move { fetch(&http, &installer, &sums, &version).await }))
-                    .await;
+            let fetched = join(
+                io.spawn(async move { fetch(&http, &installer, &sums, &version, &file).await }),
+            )
+            .await;
             let started = fetched.and_then(|installer| launch(&installer));
             match started {
                 Ok(()) => {
@@ -183,11 +194,27 @@ async fn latest(http: &reqwest::Client) -> Result<Option<Release>> {
         return Ok(None);
     }
 
+    #[cfg(target_os = "windows")]
+    let installer = Some(format!("{REPO}/releases/download/{tag}/{INSTALLER}"));
+    #[cfg(target_os = "windows")]
+    let sums = Some(format!("{REPO}/releases/download/{tag}/{SUMS}"));
+
+    #[cfg(target_os = "linux")]
+    let installer = Some(format!(
+        "{REPO}/releases/download/{tag}/{}",
+        deb_name(version)
+    ));
+    #[cfg(target_os = "linux")]
+    let sums = Some(format!("{REPO}/releases/download/{tag}/{SUMS}"));
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let (installer, sums) = (None, None);
+
     Ok(Some(Release {
         version: version.to_owned(),
         page: format!("{REPO}/releases/tag/{tag}"),
-        installer: Some(format!("{REPO}/releases/download/{tag}/{INSTALLER}")),
-        sums: Some(format!("{REPO}/releases/download/{tag}/{SUMS}")),
+        installer,
+        sums,
     }))
 }
 
@@ -196,6 +223,7 @@ async fn fetch(
     installer: &str,
     sums: &str,
     version: &str,
+    file: &str,
 ) -> Result<PathBuf> {
     let listed = http
         .get(sums)
@@ -216,7 +244,7 @@ async fn fetch(
                 .trim_start_matches('*')
                 .rsplit(['/', '\\'])
                 .next()
-                == Some(INSTALLER)
+                == Some(file)
         })
         .map(|(sum, _)| sum.trim().to_ascii_lowercase())
         .context("the release lists no checksum for the installer")?;
@@ -238,11 +266,12 @@ async fn fetch(
         anyhow::bail!("the installer does not match its checksum");
     }
 
-    let path = std::env::temp_dir().join(format!("Tempo-Desktop-Setup-{version}.exe"));
+    let path = std::env::temp_dir().join(format!("{version}-{file}"));
     std::fs::write(&path, &bytes).context("cannot keep the installer")?;
     Ok(path)
 }
 
+#[cfg(target_os = "windows")]
 fn launch(installer: &Path) -> Result<()> {
     Command::new(installer)
         .args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/relaunch=1"])
@@ -251,11 +280,71 @@ fn launch(installer: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Installs the package with a polkit prompt, then starts the new binary after the old app quits.
+#[cfg(target_os = "linux")]
+fn launch(installer: &Path) -> Result<()> {
+    let status = Command::new("pkexec")
+        .arg("/usr/bin/dpkg")
+        .arg("-i")
+        .arg(installer)
+        .status()
+        .context("cannot start the package installer")?;
+    if !status.success() {
+        bail!("the package installer was cancelled or failed");
+    }
+
+    let exe = std::env::current_exe().context("cannot find the running app")?;
+    Command::new("sh")
+        .arg("-c")
+        .arg("sleep 2; exec \"$1\"")
+        .arg("sh")
+        .arg(exe)
+        .spawn()
+        .context("cannot relaunch the app")?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn launch(_installer: &Path) -> Result<()> {
+    bail!("updates are not installed automatically on this platform")
+}
+
+#[cfg(target_os = "windows")]
 fn installed() -> bool {
     std::env::current_exe()
         .ok()
         .and_then(|exe| Some(exe.parent()?.join(UNINSTALLER)))
         .is_some_and(|uninstaller| uninstaller.exists())
+}
+
+/// Whether this binary came from the Debian package, which can be upgraded in place.
+#[cfg(target_os = "linux")]
+fn installed() -> bool {
+    let packaged = std::env::current_exe()
+        .ok()
+        .is_some_and(|exe| exe.starts_with("/usr/bin/"));
+    packaged && Path::new("/usr/share/doc/tempo-desktop").exists()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn installed() -> bool {
+    false
+}
+
+/// The Debian architecture name for the machine running the app.
+#[cfg(target_os = "linux")]
+fn package_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        arch => arch,
+    }
+}
+
+/// The release asset name for this version's Debian package.
+#[cfg(target_os = "linux")]
+fn deb_name(version: &str) -> String {
+    format!("{DEB}{version}_{}.deb", package_arch())
 }
 
 fn newer(offered: &str, running: &str) -> bool {
